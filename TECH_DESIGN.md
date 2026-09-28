@@ -2,10 +2,10 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.6 草案（待评审，**未定稿**；待 `PRD.md` 确认后定稿） |
+| 文档版本 | **v1.0 定稿稿**（待你最终确认后生效；生效后按 §14 的变更流程修改） |
 | 对应阶段 | KICKOFF 第 3 步「技术方案与数据模型」 |
-| 前置文档 | `PRD.md` 初稿已产出（待确认）；`WIREFRAME.md` 尚未产出；剩余问题列在 §14 |
-| 本版主要变化 | 按 2026-09-28 的确认结果（§0.2）调整：主流程改为**业务服务触发 → 自动校验 → 自动写入独占的 MySQL 业务表**；主键改为可选；回滚适配业务表 |
+| 前置文档 | `PRD.md` v1.0、`WIREFRAME.md` v1.0（三份文档的对照见 §16） |
+| 定稿检查 | 已对 PRD / 原型 / 技术方案做一致性检查，修正项见 §0.3 |
 
 ---
 
@@ -49,25 +49,31 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
 | D24 | 外键引用 | 校验节点通过可见的**引用输入端口**接入被引用的流，外键规则只能引用已连接端口的字段 | 依赖关系全部体现为连线；§6.1、§9 |
 | D25 | 跨文件引用 | **暂不支持**：被引用数据必须与主数据在同一个文件中 | 「引用另一方案的线上数据」保留为 v2 方向 |
 
-### 0.3 本版变化与影响面分析（按 KICKOFF §3.1）
+### 0.3 定稿前一致性检查的修正项（v0.6 → v1.0）
 
-> 项目尚未进入开发，本次调整**不产生代码返工**；但文档 §1、§2、§3、§6.5、§10~§15 为重写。
+| # | 发现的问题 | 修正 |
+|---|---|---|
+| C1 | 表达式中的 `$p.`、`$row.` 不是合法的 CEL 标识符（CEL 标识符不能含 `$`） | 改为保留变量 `params.<别名>.<字段>`、`meta.index`、`meta.sheetRow`；字段名不得使用 `params`、`meta` 及 CEL 保留字（§5.3、§5.5） |
+| C2 | CEL 数值类型严格，`int * double` 不能直接运算，原示例 `int(baseHp * 系数)` 无法通过类型检查 | 示例改为 `int(double(baseHp) * params.global.hpRate)`；编辑器对类型错误给出「插入类型转换」的修复建议（§5.5） |
+| C3 | 方案版本表注明「不可变」，但草稿需要反复保存 | 新增 `cf_pipeline_draft`（每个方案一份可变草稿，乐观锁）；`cf_pipeline_revision` 只在发布时生成（§3） |
+| C4 | 控制台试跑的是草稿，但任务表要求 `revision_id` 非空 | `revision_id` 允许为空，试跑任务保存 `dsl_snapshot`（§3） |
+| C5 | 表绑定既在 DSL 里又在 `cf_table_binding` 里，来源不唯一 | DSL 为唯一来源；`cf_table_binding` 改为发布时生成的只读索引；表占用在**草稿保存时**登记（§3） |
+| C6 | 预览采样在源节点执行，会把外键引用集合、关联右表、参数也截断，导致误报 | 被引用输入 / 关联右侧 / 查表字典 / 参数端口消费的区域**不采样**（§7.9） |
+| C7 | 类型转换失败的行用 `INVALID` 占位继续向下游流动，可能引发连锁误报 | 转换失败的行从区域主输出移除（问题已记录，任务不会写表）（§7.8） |
+| C8 | 首次发布时线上行数为 0，G3/G4 的比例计算除以 0 | 线上为空时跳过 G3/G4，由 G2/G5 负责（§10.2） |
+| C9 | 原型中的若干操作缺少接口：样例文件、草稿读取、配置对比、待处理计数、历史文件列表、连接测试、回调记录等 | Console API 补全（§6.5.2） |
+| C10 | 原型 P3-4「变更摘要 + 安全闸预判」、只校验模式的预检结果缺少后端定义 | TEST / VALIDATE_ONLY 任务也执行 Diff 与安全闸，但只作「预判」不写表（§10.1） |
+| C11 | 快照、原始文件、备份表的保留期只有设置项，没有清理机制 | 新增 §10.9 数据清理 |
+| C12 | 第三方依赖分散在各章节，没有统一的审批清单 | §13.1 汇总依赖清单，随定稿一并确认（KICKOFF §3.2） |
+| C13 | 文档头部与 §0.3/§0.4 仍是早期版本的描述（如「文件 URL 拉取的 SSRF 防护」） | 已清理；历史演进见 `KICKOFF.md` 变更记录 |
 
-| 维度 | 分析 |
-|---|---|
-| 进度影响 | 去掉审批流、差异审阅页，**减少**约 1 周；新增 Open API、任务队列与并发控制、MySQL 写入与崩溃恢复、安全闸、方案回归测试，**增加**约 2~3 周。净增约 1~2 周 |
-| 技术方案影响 | ① 运行主体从「人发起的 Run」变为「服务发起的 ParseJob」；② 元数据库由 PostgreSQL 改为 MySQL；③ 快照改为对象存储文件（不再逐行存库）；④ 主键可选 → 写入策略与 Diff 精度按有无主键分级 |
-| 界面/交互影响 | 删除：发布审批页。新增：数据源与目标表绑定页（自动读取表结构、字段映射）、方案版本发布页（含历史文件回归结果）、任务监控页（按调用方/状态筛选，点进去用 Univer 看错误单元格）、回滚页 |
-| 合规/安全 | 新增服务间鉴权（调用方 AppKey + 请求签名）、回调签名、文件 URL 拉取的 SSRF 防护；业务库账号需最小权限（仅目标库的 CREATE/DROP/ALTER/INSERT/SELECT/RENAME） |
-| 主要新风险 | **没有人工审批，一份错误但"格式合法"的文件会直接写进线上表**。对策：安全闸（行数/删除比例/空表保护）+ 方案发布前的历史文件回归 + 一键回滚，见 §10.2 |
-
-### 0.4 保持不变的设计基础（v0.2 已形成）
+### 0.4 设计基础
 
 - 区域 = **定位器 Locator（在哪）× 形态 Shape（怎么读）× 列规格 Columns（读成什么）**，按表头名绑定字段，抗插行插列（§4）。
-- 区域形态 8 种 + 屏蔽区 + 多 Sheet 源，分期交付（§4.3）。
 - **四层清洗模型**：单元格归一化 → 形态解析 → 列级类型清洗 → 结构变换节点（§5）。
 - 全链路**单元格血缘**：每个错误能定位到原始 Excel 的具体单元格（§6.3、§9.3）。
-- JOIN 的设计期重名消解与运行期爆炸拦截（§8）；VALIDATOR 侧输出「不阻塞执行、阻塞写入」（§9）。
+- 运行期只流转快照行；before/after 只出现在写表时的 Diff 中（§6.3、§6.4）。
+- 人的控制点在**方案版本发布**（含历史文件回归）；运行期全自动，由**安全闸 + 一键回滚 + 冻结**兜底（§10）。
 
 ---
 
@@ -94,7 +100,7 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
 | **SourceFile** | 上传的原始文件，对象存储保存，sha256 去重 |
 | **ParseJob（解析任务）** | 调用方的一次提交；控制台试跑也是 ParseJob（`mode=TEST`，永不写表） |
 | **Snapshot（快照）** | 某数据集在某次任务中的全量结果，存对象存储（压缩 JSONL/Parquet），不可变 |
-| **Release（发布记录）** | 一次成功写表：包含方案所有目标表的快照引用、写入前后校验和、备份表名 |
+| **Release（发布记录）** | 一次成功写表：包含方案所有目标表的快照引用、写入前后校验和、备份表名。类型：正常 / 回滚 / 人工放行 / 接管基线 |
 | **LiveState（线上指针）** | 每个方案当前写在业务表里的是哪个 Release；发布/回滚都更新它 |
 
 ---
@@ -151,8 +157,8 @@ flowchart LR
 **设计期（人）**
 
 ```
-① 上传样例文件 → sha256 → 对象存储 → Loader 解析 → 服务端转 Univer 快照 JSON 返回前端
-② Univer 中框选区域 → 侧边栏选择 形态 / 定位器 / 列规格 → 绑定到 EXCEL_SOURCE 节点的输出端口
+① 为方案上传样例文件（所有源节点共用）→ sha256 → 对象存储 → Loader 解析 → 服务端转 Univer 快照 JSON 返回前端
+② 双击源节点进入分屏，在表格区框选区域 → 配置面板选择 形态 / 定位器 / 列规格 → 源节点长出对应输出端口
 ③ 画布拉线编排 TRANSFORM / JOIN / VALIDATOR → SINK；每次修改触发服务端 Schema 推导
 ④ SINK 绑定目标表：选择数据源 + 表名 → 服务端读取 information_schema → 自动字段映射 → 用户修正
    → 服务端检查：类型兼容、非空列是否都有来源、表是否有触发器/被外键引用/自增主键（决定可用的写入策略）
@@ -182,7 +188,7 @@ flowchart LR
 
 ---
 
-## 3. 元数据库表结构（MySQL 8，草案）
+## 3. 元数据库表结构（MySQL 8）
 
 > 元数据库与业务库**分开部署**（至少分库），CellFlow 对业务库只做 §10.3 所需操作。快照与变更明细存对象存储，数据库里只存引用与摘要。
 
@@ -196,18 +202,30 @@ CREATE TABLE cf_pipeline (
   published_rev_id  BIGINT,
   sample_file_id    BIGINT,                            -- D23：方案级样例文件，所有源节点共用
   frozen            TINYINT(1)   NOT NULL DEFAULT 0,   -- 冻结后拒绝新任务（回滚后默认冻结，§10.6）
-  owner             VARCHAR(64)  NOT NULL,
+  description       VARCHAR(512),
+  owner             VARCHAR(64)  NOT NULL,             -- v1 为创建人自填姓名（D19）
   created_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   UNIQUE KEY uk_code (code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE cf_pipeline_revision (                    -- 不可变
+CREATE TABLE cf_pipeline_draft (                       -- C3：每个方案一份可变草稿
+  pipeline_id       BIGINT PRIMARY KEY,
+  dsl               JSON        NOT NULL,
+  base_rev          INT,                               -- 基于哪个已发布版本修改；新方案为空
+  version           BIGINT      NOT NULL,              -- 乐观锁，每次保存 +1（冲突 409 DSL_REV_CONFLICT）
+  updated_by        VARCHAR(64) NOT NULL,
+  updated_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE cf_pipeline_revision (                    -- 不可变；只在发布时由草稿生成
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   pipeline_id       BIGINT      NOT NULL,
   rev               INT         NOT NULL,
   dsl               JSON        NOT NULL,              -- §6.1
   dsl_schema_ver    VARCHAR(16) NOT NULL,
-  status            VARCHAR(16) NOT NULL,              -- DRAFT | PUBLISHED | RETIRED
+  status            VARCHAR(16) NOT NULL,              -- PUBLISHED（当前生效，唯一）| RETIRED
+  note              VARCHAR(512),                      -- 发布说明
   regression_report JSON,                              -- 发布前历史文件回归结果
   created_by        VARCHAR(64) NOT NULL,
   published_by      VARCHAR(64),
@@ -218,13 +236,13 @@ CREATE TABLE cf_pipeline_revision (                    -- 不可变
 CREATE TABLE cf_datasource (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   name              VARCHAR(64)  NOT NULL,
-  jdbc_host_ref     VARCHAR(128) NOT NULL,             -- 环境变量/密钥管理中的引用名，不存真实地址与密码
+  host_ref          VARCHAR(128) NOT NULL,             -- 环境变量/密钥管理中的引用名，不存真实地址与密码
   db_name           VARCHAR(64)  NOT NULL,
   credential_ref    VARCHAR(128) NOT NULL,
   UNIQUE KEY uk_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE cf_table_binding (                        -- 属于某个方案版本（随 DSL 一起版本化）
+CREATE TABLE cf_table_binding (                        -- C5：发布时从 DSL 的 SINK 节点生成的只读索引，DSL 为唯一来源
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   revision_id       BIGINT       NOT NULL,
   dataset           VARCHAR(128) NOT NULL,             -- SINK 节点的数据集名
@@ -237,7 +255,7 @@ CREATE TABLE cf_table_binding (                        -- 属于某个方案版�
   UNIQUE KEY uk_tbl (revision_id, table_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE cf_table_owner (                          -- D9：一张业务表只能被一个方案独占
+CREATE TABLE cf_table_owner (                          -- D9：一张业务表只能被一个方案独占；草稿保存时登记，草稿与生效版本都不再引用时释放
   datasource_id     BIGINT      NOT NULL,
   table_name        VARCHAR(64) NOT NULL,
   pipeline_id       BIGINT      NOT NULL,
@@ -251,7 +269,7 @@ CREATE TABLE cf_client_app (
   name              VARCHAR(128) NOT NULL,
   allowed_pipelines JSON         NOT NULL,             -- ["hero_config", ...]
   callback_allowlist JSON        NOT NULL,             -- 允许的回调域名
-  rate_limit_per_min INT         NOT NULL DEFAULT 60,
+  rate_limit_per_min INT         NOT NULL,             -- 新建时取系统设置 openapi.defaultRateLimitPerMin
   enabled           TINYINT(1)   NOT NULL DEFAULT 1,
   UNIQUE KEY uk_key (app_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -272,13 +290,15 @@ CREATE TABLE cf_source_file (
 CREATE TABLE cf_parse_job (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   pipeline_id       BIGINT       NOT NULL,
-  revision_id       BIGINT       NOT NULL,             -- 入队时锁定使用的版本
+  revision_id       BIGINT,                            -- 入队时锁定的已发布版本；控制台试跑草稿时为空（C4）
+  dsl_snapshot      JSON,                              -- 试跑草稿时保存所用 DSL，保证结果可复现
   client_app_id     BIGINT,                            -- 控制台试跑时为空
   idempotency_key   VARCHAR(128),
   file_id           BIGINT       NOT NULL,
   mode              VARCHAR(16)  NOT NULL,             -- EXECUTE | VALIDATE_ONLY | TEST
   status            VARCHAR(24)  NOT NULL,             -- 见 §10.1 状态机
   superseded_by     BIGINT,                            -- D12：被哪个更新的任务作废
+  operator          VARCHAR(64),                       -- 调用方透传的操作人 / 控制台操作人
   callback_url      VARCHAR(512),
   error_summary     JSON,                              -- {error: n, warn: n, guard: "..."}
   metrics           JSON,                              -- 每节点行数、耗时、定位报告
@@ -303,6 +323,7 @@ CREATE TABLE cf_job_issue (
   field             VARCHAR(128),
   value_text        VARCHAR(1024),
   message           VARCHAR(1024) NOT NULL,
+  related_cells     JSON,                              -- 派生列、对账等涉及多个单元格时的全部位置
   KEY idx_job (job_id, node_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -378,7 +399,7 @@ CREATE TABLE cf_audit_log (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   operator          VARCHAR(64)  NOT NULL,             -- v1 为操作人自填（D19），接入 SSO 后为登录账号
   source_ip         VARCHAR(45)  NOT NULL,
-  action            VARCHAR(32)  NOT NULL,             -- PUBLISH_REVISION | FORCE_PUBLISH | ROLLBACK | FREEZE | UNFREEZE | EDIT_DATASOURCE | EDIT_CLIENT | EDIT_SETTING
+  action            VARCHAR(32)  NOT NULL,             -- PUBLISH_REVISION | REPUBLISH_REVISION | FORCE_PUBLISH | ROLLBACK | FREEZE | UNFREEZE | EDIT_DATASOURCE | EDIT_CLIENT | EDIT_SETTING
   target            VARCHAR(128) NOT NULL,
   detail            JSON,                              -- 修改前后值等
   reason            VARCHAR(512),
@@ -386,6 +407,11 @@ CREATE TABLE cf_audit_log (
   KEY idx_target (target, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
+
+说明：
+- 所有表不使用数据库外键约束，引用完整性由应用层保证（便于归档清理，§10.9）。
+- 口令错误计数与 IP 锁定、Open API 的 nonce 去重、限流计数放在 Redis（带过期时间），不落元数据库。
+- 业务库中 CellFlow 只会创建：影子表 `*__cfs_*`、备份表 `*__cfb_*`、辅助表 `_cellflow_marker`（D11）。
 
 ---
 
@@ -474,7 +500,7 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 ```jsonc
 {
   "source": "奖励道具",               // 表头文本（支持正则 /^奖励.*$/ ，支持多级表头 "奖励.道具"）
-  "field": "rewardItems",            // 输出字段名（英文标识，符合 ^[a-zA-Z_][a-zA-Z0-9_]*$）
+  "field": "rewardItems",            // 输出字段名（英文标识，符合 ^[a-zA-Z_][a-zA-Z0-9_]*$，且不得为 params / meta / CEL 保留字）
   "type": "list<struct<itemId:long,count:int>>",
   "required": true,
   "isKey": false,
@@ -526,7 +552,7 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | 端口 | 所在节点 | 接受 | 用途 |
 |---|---|---|---|
 | 数据输入 `in` / `in_main` / `in_left` / `in_right` | 各节点 | 任意流 | 被处理的主数据 |
-| **参数端口** `in_params` | FILTER / DERIVE / VALIDATOR | **单行流**，只接一条线，在 `config.params` 中起别名；需要多个参数来源时，先用广播关联把它们合成一行 | 表达式中 `$p.<别名>.<字段>` 引用；RECONCILE 对账的汇总值（§8.4、§9） |
+| **参数端口** `in_params` | FILTER / DERIVE / VALIDATOR | **单行流**，只接一条线，在 `config.params` 中起别名；需要多个参数来源时，先用广播关联把它们合成一行 | 表达式中 `params.<别名>.<字段>` 引用；RECONCILE 对账的汇总值（§8.4、§9） |
 | **引用输入** `in_ref_<别名>` | VALIDATOR | 多行流（可添加多个，各起别名） | 外键规则的被引用集合（D24，§9） |
 | 侧输出 `out_reject` / `out_unmatched` | DERIVE / VALIDATOR / JOIN | — | 被拒行、未匹配行 |
 
@@ -539,7 +565,7 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
   "params": {"global": "in_params"},
   "columns": [
     {"field": "rowId",    "expr": "rewardId * 100 + level",           "type": "long"},
-    {"field": "hp",       "expr": "int(baseHp * $p.global.hpRate)",   "type": "int"},
+    {"field": "hp",       "expr": "int(double(baseHp) * params.global.hpRate)", "type": "int"},
     {"field": "tag",      "expr": "job + '_' + string(level)",        "type": "string"},
     {"field": "grade",    "expr": "level >= 60 ? 'HIGH' : 'LOW'",     "type": "string"},
     {"field": "iconPath", "expr": "coalesce(icon, 'default.png')",    "type": "string"},
@@ -562,6 +588,8 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | 单行出错 | 除以 0、转换失败、溢出：`onError: ERROR`（默认）记 ERROR，定位到表达式所引用字段的**原始单元格**，该行进入 `out_reject`；`onError: NULL` 置空并记 WARN |
 | 血缘 | 派生字段的 `_lineage` = 所引用字段来源单元格的并集（含参数端口的键值区单元格） |
 | 安全 | CEL 沙箱；表达式长度 ≤ 1000 字符、单行求值步数上限 |
+| 数值类型 | CEL 不做隐式数值转换：`int` 与 `double` 混合运算需显式 `double(x)` / `int(x)`；编辑器检测到此类类型错误时给出「插入类型转换」的一键修复（C2） |
+| 保留名 | `params`、`meta` 为保留变量；字段名不得与之或 CEL 保留字（`in`、`as`、`null`、`true`、`false` 等）相同，列规格保存时校验（C1） |
 | 不支持 | 跨行计算（上一行、累计、组内序号）→ v2 的 WINDOW 节点 |
 
 **v1 函数库**（CEL 内置 + CellFlow 注册的自定义函数，前后端同一份清单用于自动补全与校验）
@@ -574,7 +602,7 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | 类型转换 | `int`, `double`, `string`, `bool`, `decimal(x, scale)` |
 | 日期 | `date(s)`, `datetime(s)`, `addDays`, `diffDays`, `formatDate(d, fmt)`, `timestamp(d)` |
 | 列表 | `size`, `list[i]`, `sum`, `exists`, `all`, `map`, `filter`（配合 §5.3 单元格内拆分得到的列表字段） |
-| 参数与行信息 | `$p.<别名>.<字段>`（§8.4）、`$row.index`（区域内序号，从 1 开始）、`$row.sheetRow`（Excel 行号） |
+| 参数与行信息 | `params.<别名>.<字段>`（§8.4）、`meta.index`（区域内序号，从 1 开始）、`meta.sheetRow`（Excel 行号） |
 
 ```python
 def run_derive(cfg, inputs, ctx):
@@ -617,6 +645,7 @@ def run_derive(cfg, inputs, ctx):
   "sampleFileId": 5012,
   "datasource": "game_cfg_mysql",
   "baseRev": 7,
+  "draftVersion": 23,
   "nodes": [
     {
       "id": "src_hero",
@@ -883,7 +912,7 @@ def run_derive(cfg, inputs, ctx):
 5. `side: true` 的端口允许悬空（不连线时仅进入问题报告）。
 6. `kind: REF` 的引用输入必须有且只有一条入边；`refs` 中的别名与端口一一对应；外键规则的 `ref.input` 必须指向已连接的引用输入，`ref.field` 必须存在于其 Schema（D24）。删除被引用的源或连线时，相关规则在保存时报错。
 7. 所有 `EXCEL_SOURCE` 读取方案的同一个样例文件/任务文件（D23），源节点配置中不含文件，只含 Sheet 匹配规则。
-8. `kind: PARAM` 的参数端口只能接入**单行流**（`KEY_VALUE` 的 `WIDE` 输出、`SUMMARY`，或经推导确定为单行的流）；表达式中的 `$p.<别名>.<字段>` 必须存在于所连参数流的 Schema。
+8. `kind: PARAM` 的参数端口只能接入**单行流**（`KEY_VALUE` 的 `WIDE` 输出、`SUMMARY`，或经推导确定为单行的流）；表达式中的 `params.<别名>.<字段>` 必须存在于所连参数流的 Schema。
 
 ### 6.2 端口 Schema（推导结果，前端用于下拉和冲突提示）
 
@@ -1010,30 +1039,42 @@ def run_derive(cfg, inputs, ctx):
 
 **v1 鉴权（D19）**：不做登录，仅内网部署。标记为 🔒 的高危接口需请求头 `X-CF-Op-Token`（与环境变量中配置的操作口令比对）和 `X-CF-Operator`（操作人姓名），并写入 `cf_audit_log`；口令连续错误 5 次锁定该 IP 10 分钟。接入 SSO 后，口令校验替换为角色权限校验，接口不变。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/files` | 上传样例文件，返回 `fileId`、Sheet 列表、结构指纹 |
-| GET | `/api/files/{fileId}/sheets/{sheet}/univer` | Univer 快照 JSON（`?rows=1-500` 分页） |
-| POST / GET | `/api/pipelines`、`/api/pipelines/{id}` | 新建 / 查看方案 |
-| PUT | `/api/pipelines/{id}/draft` | 保存草稿（`baseRev` 乐观锁，冲突 409 `DSL_REV_CONFLICT`） |
-| POST | `/api/pipelines/{id}/schema` | DSL 静态校验 + Schema 推导（§6.2） |
-| POST | `/api/regions/suggest` | 按框选范围推荐形态/定位器/表头 |
-| GET | `/api/datasources/{id}/tables/{table}` | 读取目标表结构（列、类型、主键/唯一键、自增、触发器、被引用外键） |
-| POST | `/api/pipelines/{id}/bindings/check` | 校验字段映射与写入策略可行性 |
-| POST | `/api/jobs/test` | 试跑（`mode=TEST`，`fileId`、`sampleRows?`、`untilNodeId?`），永不写表；`fileId` 可以是样例文件，也可以取自任一历史任务（W2） |
-| GET | `/api/jobs/{jobId}/nodes/{nodeId}/ports/{portId}/rows` | 分页查看节点输出（含 `_lineage`） |
-| POST | `/api/pipelines/{id}/revisions/{rev}/regression` | 用最近 N 个成功任务的文件回归，返回新旧版本结果差异 |
-| POST | `/api/pipelines/{id}/revisions/{rev}/publish` | 🔒 发布方案版本 |
-| GET | `/api/jobs` | 任务列表（按方案/调用方/状态/时间筛选） |
-| GET | `/api/jobs/{jobId}/issues` | 问题列表（画布角标、Univer 高亮） |
-| POST | `/api/jobs/{jobId}/force-publish` | 🔒 安全闸拦截后人工放行（填写理由，记为 `kind=FORCED`） |
-| GET | `/api/pipelines/{id}/releases` | 发布历史 |
-| GET | `/api/releases/{id}/changes` | 变更明细（`?table=&op=`，分页读取对象存储文件） |
-| POST | `/api/pipelines/{id}/rollback` | 🔒 `{targetReleaseId, expectedLiveReleaseId, reason, freeze}` |
-| POST | `/api/pipelines/{id}/freeze` \| `/unfreeze` | 🔒 冻结 / 解冻方案 |
-| PUT | `/api/datasources/{id}`、`/api/client-apps/{id}` | 🔒 修改数据源 / 调用方 |
-| GET / PUT | `/api/settings` | 查看 / 🔒 修改系统设置（§10.8） |
-| GET | `/api/audit-logs` | 审计日志查询 |
+| 分组 | 方法 | 路径 | 说明 | 对应原型 |
+|---|---|---|---|---|
+| 文件 | POST | `/api/files` | 上传文件，返回 `fileId`、Sheet 列表、结构指纹 | P2、P3 |
+| 文件 | GET | `/api/files/{fileId}/sheets/{sheet}/univer` | Univer 快照 JSON（`?rows=1-500` 分页） | P3-1、P6 |
+| 方案 | GET / POST | `/api/pipelines`、`/api/pipelines/{id}` | 列表（含生效版本、草稿是否有改动、冻结、最近任务）/ 新建 / 详情 | P1、P2 |
+| 方案 | PATCH | `/api/pipelines/{id}` | 修改名称、说明 | P8 |
+| 方案 | PUT | `/api/pipelines/{id}/sample-file` | 设置/更换样例文件 `{fileId}`，返回各区域在新文件上的定位变化 | P3 |
+| 草稿 | GET / PUT | `/api/pipelines/{id}/draft` | 读取 / 保存草稿（带 `draftVersion`，冲突 409 `DSL_REV_CONFLICT`，返回对方保存人与时间） | P3 |
+| 草稿 | POST | `/api/pipelines/{id}/schema` | 草稿静态校验 + 每个端口的 Schema 推导（§6.2） | P3 |
+| 草稿 | POST | `/api/regions/suggest` | 按框选范围推荐形态 / 定位器 / 表头 | P3-1 |
+| 表达式 | POST | `/api/expressions/check` | 表达式语法与类型检查、补全候选、快速预览（前 5 行） | P3-2 |
+| 绑定 | GET | `/api/datasources/{id}/tables`、`/api/datasources/{id}/tables/{table}` | 表清单（含占用方案）/ 表结构（列、类型、主键/唯一键、自增、触发器、被引用外键、字符集） | P3-3 |
+| 绑定 | POST | `/api/pipelines/{id}/bindings/check` | 校验字段映射与写入策略可行性 | P3-3 |
+| 试跑 | GET | `/api/pipelines/{id}/recent-files` | 最近 20 个任务的文件（文件名、调用方、时间），供完整试跑选择（W2） | P3 |
+| 试跑 | POST | `/api/jobs/test` | 试跑草稿（`mode=TEST`，`fileId`、`sampleRows?`、`untilNodeId?`），永不写表；返回结果、问题、定位报告、Diff 与安全闸预判 | P3-4 |
+| 试跑 | GET | `/api/jobs/{jobId}/nodes/{nodeId}/ports/{portId}/rows` | 分页查看节点输出（含 `_lineage`） | P3-4 |
+| 版本 | GET | `/api/pipelines/{id}/revisions` | 版本列表 | P4 |
+| 版本 | GET | `/api/pipelines/{id}/revisions/{rev}/diff?against=draft\|live\|{rev}` | 配置差异（节点、连线、绑定） | P4、P4-1 |
+| 版本 | POST / GET | `/api/pipelines/{id}/regression`、`/api/regressions/{rid}` | 用草稿对最近 N 个成功任务的文件做回归（异步）/ 查询进度与结果 | P4-1 |
+| 版本 | POST | `/api/pipelines/{id}/publish` | 🔒 草稿发布为新版本 `{draftVersion, note, regressionId}` | P4-1 |
+| 版本 | POST | `/api/pipelines/{id}/revisions/{rev}/republish` | 🔒 重新发布历史版本 | P4 |
+| 任务 | GET | `/api/jobs` | 列表（方案/调用方/状态/模式/时间/任务 ID 筛选；`view=pending` 为待处理视图） | P5 |
+| 任务 | GET | `/api/jobs/pending-count` | 待处理数量（导航角标，W4） | 全局 |
+| 任务 | GET | `/api/jobs/{jobId}` | 详情：阶段时间线、安全闸逐条结果、指标、定位报告 | P6 |
+| 任务 | GET | `/api/jobs/{jobId}/issues`、`/api/jobs/{jobId}/changes` | 问题列表 / 变更明细（`?table=&op=`） | P6 |
+| 任务 | GET | `/api/jobs/{jobId}/callbacks`、`/api/jobs/{jobId}/file` | 回调投递记录 / 原始文件下载 | P6 |
+| 任务 | POST | `/api/jobs/{jobId}/force-publish` | 🔒 放行被安全闸拦截的任务（理由必填，`kind=FORCED`；G1/G6/G8 不可放行） | P6 |
+| 发布 | GET | `/api/pipelines/{id}/releases`、`/api/releases/{id}/changes` | 发布历史 / 变更明细 | P7 |
+| 发布 | POST | `/api/pipelines/{id}/rollback/preview` | 回滚预览：各表变化、执行方式、结构兼容与漂移检查 | P7-1 |
+| 发布 | POST | `/api/pipelines/{id}/rollback` | 🔒 `{targetReleaseId, expectedLiveReleaseId, reason, freeze, confirmDrift}` | P7-1 |
+| 发布 | POST | `/api/pipelines/{id}/freeze`、`/unfreeze` | 🔒 冻结 / 解冻 | P7、P8 |
+| 管理 | GET / POST / PUT / DELETE | `/api/datasources[/{id}]` | 数据源列表 / 🔒 新建、修改、删除（无方案使用时） | P9 |
+| 管理 | POST | `/api/datasources/{id}/test` | 连通性与权限检查（CREATE/DROP/ALTER/INSERT/SELECT、`_cellflow_marker`） | P9 |
+| 管理 | GET / POST / PUT | `/api/client-apps[/{id}]` | 调用方列表 / 🔒 新建、修改、启用停用 | P10 |
+| 管理 | GET / PUT | `/api/settings` | 查看 / 🔒 修改系统设置（§10.8） | P11 |
+| 管理 | GET | `/api/audit-logs` | 审计日志查询 | P12 |
 
 ### 6.6 错误码（节选）
 
@@ -1398,7 +1439,7 @@ def coerce_column(series: pd.Series, spec: dict, lineage, ctx) -> pd.Series:
             out.append(convert(v, spec, ctx))
         except CoerceError as e:
             ctx.issue("ERROR", e.code, cell=cell, field=spec["field"], value=v)
-            out.append(INVALID)                           # 占位，行进入侧输出而非直接丢弃
+            out.append(INVALID)                           # 占位；bind_and_coerce 随后把含 INVALID 的行从主输出移除（C7）
     return pd.Series(out, dtype=object)
 
 def convert(v, spec, ctx):
@@ -1450,6 +1491,9 @@ def execute(dsl: dict, file_id: int, mode: str, sample_rows: int | None = None) 
 
 class ExcelSourceNode:
     def run(self, cfg, inputs, ctx):
+        if cfg["sheet"]["match"] == "REGEX":                      # 多 Sheet 同构合并，§7.7.2
+            return run_sheet_set(cfg, ctx)
+        # 注：REPEATING_BLOCK 需要在整张网格上找块，解析器接收 (grid, rect)，其余形态接收 Block
         grid = ctx.grid_cache.get_or_load(cfg["sheet"], cfg.get("loaderOptions", {}))  # 同 Sheet 只加载一次
         rects = {r["regionId"]: resolve_rect(grid, r["locator"], to_rect(r["designRange"]))
                  for r in cfg["regions"]}
@@ -1461,8 +1505,10 @@ class ExcelSourceNode:
                      if x["shape"] == "IGNORE" or x["regionId"] in r.get("excludeFrom", [])]
             block = slice_block(grid, rects[r["regionId"]], masks)
             df, lin = SHAPE_PARSERS[r["shape"]](block, r.get("shapeOptions", {}))
-            df, lin = bind_and_coerce(df, lin, r["columns"], ctx)   # 按表头名绑定 + L3 清洗
-            if ctx.sample_rows: df, lin = df.head(ctx.sample_rows), lin[:ctx.sample_rows]
+            df, lin = bind_and_coerce(df, lin, r["columns"], ctx)   # 按表头名绑定 + L3 清洗；转换失败的行已移除（C7）
+            if ctx.sample_rows and not ctx.is_reference_port(r["outputPortId"]):
+                # C6：被引用输入 / 关联右侧 / 查表字典 / 参数端口消费的区域不采样，避免外键与关联误报
+                df, lin = df.head(ctx.sample_rows), lin[:ctx.sample_rows]
             out[r["outputPortId"]] = Dataset(df, lin, schema_of(r["columns"]))
         ctx.locate_report[cfg["sheet"]["value"]] = rects
         return out
@@ -1548,7 +1594,7 @@ def run_join(cfg, left: Dataset, right: Dataset, ctx):
 | 场景 | 例子 | 方式 |
 |---|---|---|
 | A. 全局参数附加到每一行 | 键值区有「活动ID」「配置版本」，明细每行写表都要带上 | JOIN 的 `joinType: BROADCAST` |
-| B. 参数参与计算或校验 | `hp = baseHp * 血量系数`、`count <= 单次奖励上限` | 节点参数端口 `in_params` + 表达式 `$p.<别名>.<字段>` |
+| B. 参数参与计算或校验 | `hp = baseHp * 血量系数`、`count <= 单次奖励上限` | 节点参数端口 `in_params` + 表达式 `params.<别名>.<字段>` |
 | C. 明细按参数名查值 | 明细某列写「参数名」，需到键值区取值 | 键值区 `outputMode: LONG` → 普通 JOIN / LOOKUP（按 `key`） |
 
 **A. 广播关联**
@@ -1578,7 +1624,7 @@ def run_broadcast(cfg, left: Dataset, right: Dataset, ctx):
 **B. 参数端口**
 
 - FILTER / DERIVE / VALIDATOR 的 `in_params` 端口接入单行流，在 `config.params` 中给它起别名：`{"params": {"global": "in_params"}}`。
-- 表达式引用 `$p.global.hpRate`；保存时检查字段存在、类型兼容（§6.1 第 6 条）；运行时参数流不是恰好 1 行 → `PARAM_NOT_SINGLE_ROW`。
+- 表达式引用 `params.global.hpRate`；保存时检查字段存在、类型兼容（§6.1 第 8 条）；运行时参数流不是恰好 1 行 → `PARAM_NOT_SINGLE_ROW`。
 - 与广播关联相比，不会把参数字段带到下游，适合「只用来算/校验，不写表」的参数。
 
 **C. 纵向输出**
@@ -1661,11 +1707,12 @@ def run_validator(cfg, inputs, ctx):
   1. 新任务提交时，把该方案所有 `QUEUED` 状态的 EXECUTE 任务置为 `SUPERSEDED`（`superseded_by` = 新任务 ID），并回调通知各自的提交方；
   2. 正在 `RUNNING` 的较早任务在**进入写表前**再检查一次：若已有更新的 EXECUTE 任务，则放弃写表，置为 `SUPERSEDED`；
   3. 已经开始写表（Release 为 `WRITING`）的任务不中断，正常完成，随后执行最新任务；
-  4. `VALIDATE_ONLY` / `TEST` 任务不写表，既不作废别人、也不被作废。
+  4. `VALIDATE_ONLY` / `TEST` 任务不写表，既不作废别人、也不被作废，也**不获取方案锁**，可与写表任务并行。
   - 语义保证：业务表最终一定是**最后提交的那份文件**的结果（前提是它通过校验与安全闸；若它失败，业务表保持原样，不会回退去执行被作废的旧文件）。
 - 不同方案并行；每个 MySQL 数据源同时执行写入的任务数有上限（默认 2），避免集中 DDL 冲击业务库。
 - **版本锁定**：任务在**提交时**锁定方案版本（`revision_id`），排队期间发布新版本不影响已提交任务，结果可复现。
 - **幂等**：`(client_app_id, idempotency_key)` 唯一；文件 sha256 与线上 Release 所用文件相同且方案版本相同 → 直接 `NO_CHANGE`。
+- **预判（C10）**：`VALIDATE_ONLY` 与完整试跑同样执行 Diff 与安全闸，结果记为「若现在写入，会新增/修改/删除多少行、会被哪条安全闸拦截」，供调用方预检与控制台 P3-4 展示；以当时的线上版本为基准，不保证与稍后真正提交时一致。
 - **方案冻结**：`cf_pipeline.frozen = 1` 时新任务直接拒绝（`PIPELINE_FROZEN`），用于回滚后阻止下一份文件立刻把问题数据写回去（§10.6）。
 
 **状态机**：
@@ -1677,7 +1724,7 @@ SUBMITTED → QUEUED ──(有更新的 EXECUTE 任务)────────
             RUNNING ─┬─ ERROR 级问题 ─────────────────────→ FAILED_VALIDATION   （业务表未动）
                      ├─ mode=VALIDATE_ONLY / TEST ────────→ VALIDATED
                      ├─ 与线上内容完全相同 ───────────────→ NO_CHANGE
-                     ├─ 安全闸不通过 ─────────────────────→ FAILED_GUARD        （业务表未动；管理员可放行）
+                     ├─ 安全闸不通过 ─────────────────────→ FAILED_GUARD        （业务表未动；可输入口令放行）
                      ├─ 写表前发现更新的 EXECUTE 任务 ────→ SUPERSEDED          （业务表未动）
                      └─ 写入 ─┬─ 成功 ────────────────────→ PUBLISHED
                               └─ 失败（已自动清理）───────→ FAILED_WRITE        （业务表未动）
@@ -1699,6 +1746,7 @@ SUBMITTED → QUEUED ──(有更新的 EXECUTE 任务)────────
 | G7 | 漂移检测：业务表当前 `CHECKSUM TABLE` = 上次发布时记录的值 | 不一致 → 拒绝 | 可（覆盖，记入审计） |
 | G8 | 值域：字符串长度、整数范围、DECIMAL 精度不超目标列定义 | 必须通过 | **不可**（否则 MySQL 严格模式会报错或非严格模式下静默截断） |
 
+- **线上为空时**（首次发布、或线上表本来就空）：跳过 G3、G4（分母为 0），由 G2、G5 负责（C8）。
 - 拦截后任务为 `FAILED_GUARD`，回调给调用方，并在控制台任务列表中标出（v1 不做告警推送，D18）。核实后可在控制台对**该任务的快照**执行「放行」，生成 `kind=FORCED` 的 Release，并记录理由。
 - 方案版本发布前的**历史文件回归**（§1、§6.5.2）是另一道防线：用新版本重跑最近 N 个成功任务的原始文件，对比新旧版本的输出，把「配置改错了」在上线前暴露出来。
 
@@ -1873,6 +1921,20 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | `callback.maxAttempts` | 10 | 回调最大重试次数 |
 | `openapi.defaultRateLimitPerMin` | 60 | 新建调用方的默认限流 |
 
+### 10.9 数据清理（C11）
+
+每天低峰期运行一次清理任务（每个方案串行、获取方案锁，避免与写入冲突）：
+
+| 对象 | 规则 | 永不删除 |
+|---|---|---|
+| 快照、变更明细（对象存储） | 超出 `retention.releases` 且早于 `retention.days` 的 Release 所引用的快照 | 线上 Release、基线 Release、最近一次成功 Release 引用的快照 |
+| 原始文件（对象存储） | 所属任务均已超出保留期，且不被任何保留中的 Release 引用 | 方案样例文件 |
+| 试跑任务（`mode=TEST`）的结果与问题 | 7 天 | — |
+| 业务库备份表 `*__cfb_*` | 每个方案只保留最近 `retention.backupTables` 份 | 线上 Release 的上一份（保证快路径回滚可用） |
+| 元数据行（任务、问题、审计） | 任务与问题随快照一起清理；审计日志**不清理** | 审计日志 |
+
+被清理的 Release 在发布历史中仍显示（标记「已超过保留期」），但不可作为回滚目标（F14-7）。
+
 ---
 
 ## 11. 边界与异常 Case 汇总
@@ -1968,7 +2030,26 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 通知 | Outbox → HTTP 回调 | v1 只回调提交方 |
 | 控制台鉴权 | v1 操作口令；后续公司 SSO | 接口层预留统一的身份抽象，替换时接口不变 |
 
-> 按 KICKOFF §3.2，上述**第三方依赖需你确认后才会引入**。
+**第三方依赖清单（C12，按 KICKOFF §3.2 需你确认后引入；确认定稿即视为批准此清单）**
+
+| 端 | 依赖 | 用途 | 分期 |
+|---|---|---|---|
+| 后端 | FastAPI、Uvicorn、Pydantic | Web 框架与数据校验 | v1 |
+| 后端 | SQLAlchemy（Core）、PyMySQL | MySQL 访问 | v1 |
+| 后端 | openpyxl | 读取 xlsx（值、合并单元格、样式、隐藏行列） | v1 |
+| 后端 | pandas、numpy | 区域运算与数据变换 | v1 |
+| 后端 | cel-python | 表达式解析与求值 | v1 |
+| 后端 | redis-py、arq | 任务队列、锁、限流、nonce 去重 | v1 |
+| 后端 | boto3 | S3 兼容对象存储 | v1 |
+| 后端 | pyarrow | 快照以 Parquet 存储 | v1 |
+| 后端 | python-calamine | 大文件快速读取 | v2 |
+| 前端 | React、TypeScript、Vite | 前端框架与构建 | v1 |
+| 前端 | React Flow（@xyflow/react） | 画布 | v1 |
+| 前端 | Univer（开源核心，只读模式） | 表格预览与框选 | v1 |
+| 前端 | Ant Design | 通用组件（表格、表单、弹窗） | v1 |
+| 前端 | CodeMirror 6 | 表达式编辑器 | v1 |
+| 前端 | cel-js | 前端表达式语法校验 | v1 |
+| 基础设施 | MySQL 8、Redis、S3 兼容对象存储 | 元数据、队列、文件 | v1 |
 
 ### 13.2 关键风险
 
@@ -1980,15 +2061,19 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | R4 | 策划改表导致定位漂移 | ANCHOR/AUTO_EXPAND 定位器 + 定位报告 + 表头按名绑定 |
 | R5 | 公式缓存值缺失导致数据为空 | Loader 检测并报 ERROR |
 | R6 | 未声明主键时变更明细可读性差（修改显示为一删一增） | 绑定时若目标表有主键/唯一索引，自动**建议**同名字段作为主键（不强制） |
+| R10 | CEL 严格类型对非技术用户不友好（如整数乘小数需显式转换） | 编辑器自动补全、类型提示与一键修复；函数库文档内嵌在补全说明中 |
 | R8 | v1 无登录，只靠内网与共享口令 | 高危操作口令 + 审计 + IP 锁定；尽快接入 SSO |
 | R9 | v1 范围扩大（复杂形态、多 Sheet） | 形态解析器相互独立，可并行开发；优先交付 MVP 形态，复杂形态随后迭代 |
 | R7 | 业务库权限需要 DDL | 与 DBA 约定最小权限与专用账号；`_cellflow_marker` 表 DBA 已同意（D11） |
 
 ---
 
-## 14. 待确认问题
+## 14. 定稿与变更流程
 
-已确认的问题见 §0.2（D1~D22）。技术方案层面暂无待确认项；产品层面的剩余问题见 `PRD.md` §8。
+- 本文档经你确认后成为 **v1.0 定稿**，作为开发的契约锚点；PRD、原型同步定稿。
+- 定稿后，任何对**数据库表结构（§3）、DSL 协议（§6.1）、接口契约（§6.5）、错误码（§6.6）**的修改，都需按 KICKOFF §3.1 先做影响面分析、经你确认，并在 `KICKOFF.md` 变更记录中登记。
+- 不影响上述契约的实现细节（伪代码中的具体写法、内部模块划分）可在开发中调整，但需在对应任务的验收说明中写明偏差。
+- 已确认的决策见 §0.2（D1~D25）与 `WIREFRAME.md` §5（W1~W8）。**当前无待确认问题。**
 
 ---
 
@@ -2007,6 +2092,30 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 回滚 | 快路径（备份表互换）+ 常规路径（快照重写）、冻结 | 按表部分回滚、回滚通知 |
 | 方案管理 | 版本发布、历史文件回归 | 灰度（按调用方指定版本）、模板市场 |
 | 控制台 | 内网 + 操作口令、审计日志、系统设置 | SSO 登录与角色权限、告警推送 |
+
+---
+
+## 16. 需求 / 原型 / 技术方案对照
+
+| PRD 功能 | 原型页面 | 技术方案章节 |
+|---|---|---|
+| F1 样例文件上传与预览 | P2、P3、P3-1 | §2.3、§3（`cf_pipeline.sample_file_id`）、§6.5.2 文件/方案、§7.2 |
+| F2 区域圈选与配置 | P3-1 | §4、§7.3~§7.7 |
+| F3 字段配置与清洗 | P3-1 | §5.1、§5.3、§7.8 |
+| F4 画布编排与变换节点 | P3、P3-2 | §5.4、§5.5、§6.1、§6.2、§8.4 |
+| F5 关联节点 | P3-2 | §8 |
+| F6 校验节点 | P3-2、P3-4 | §9、§6.1（引用输入） |
+| F7 目标表绑定 | P3-3 | §6.1（SINK）、§10.3、§6.5.2 绑定 |
+| F8 试跑与问题定位 | P3、P3-4 | §6.3、§7.9、§10.1（预判）、§6.5.2 试跑 |
+| F9 方案版本发布 | P4、P4-1 | §3（草稿/版本）、§6.5.2 版本、§10.2（回归） |
+| F10 Open API | —（P5/P6 展示） | §6.5.1 |
+| F11 自动写表与安全闸 | P6 | §10.2~§10.5 |
+| F12 同方案只执行最新 | P5（已作废状态） | §10.1 |
+| F13 任务监控 | P5、P6 | §6.5.2 任务 |
+| F14 发布历史与回滚 | P7、P7-1、P8 | §10.6、§10.9 |
+| F15 数据源与调用方 | P9、P10 | §3、§6.5.2 管理 |
+| F16 操作口令与审计 | 口令弹窗、P12 | §6.5.2 鉴权、§3（`cf_audit_log`）、§12 |
+| F17 系统设置 | P11 | §10.8 |
 
 ---
 
