@@ -111,6 +111,7 @@ class ExprIn(BaseModel):
     fields: dict[str, str]
     params: dict[str, dict[str, str]] | None = None
     sampleRows: list[dict] | None = None
+    paramValues: dict[str, dict] | None = None  # 参数别名 → 参数行（单行）样例
     expect: str | None = None
 
 
@@ -127,7 +128,7 @@ def check_expression(body: ExprIn):
         preview = []
         for i, row in enumerate((body.sampleRows or [])[:5]):
             try:
-                preview.append({"value": p.evaluate(row, None, {"index": i + 1})})
+                preview.append({"value": p.evaluate(row, body.paramValues, {"index": i + 1})})
             except expr_mod.ExprError as e:
                 preview.append({"error": e.message})
         out["preview"] = preview

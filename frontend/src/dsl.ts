@@ -33,16 +33,16 @@ export interface PortSpec {
   optional?: boolean;
 }
 
-export const NODE_META: Record<NodeType, { label: string; group: string; icon: string }> = {
-  EXCEL_SOURCE: { label: "Excel 源", group: "源", icon: "📄" },
-  FILTER: { label: "过滤", group: "变换", icon: "⏷" },
-  DERIVE: { label: "派生列", group: "变换", icon: "ƒ" },
-  SELECT_RENAME: { label: "选列改名", group: "变换", icon: "☰" },
-  UNION: { label: "合并", group: "变换", icon: "∪" },
-  LOOKUP: { label: "查表映射", group: "变换", icon: "⇄" },
-  JOIN: { label: "关联", group: "关联", icon: "⋈" },
-  VALIDATOR: { label: "校验", group: "校验", icon: "✓" },
-  SINK: { label: "输出到业务表", group: "输出", icon: "⛁" },
+export const NODE_META: Record<NodeType, { label: string; group: string; icon: string; desc: string }> = {
+  EXCEL_SOURCE: { label: "Excel 源", group: "源", icon: "📄", desc: "读取一个 Sheet，圈选其中的表格区域；每个区域是一个输出端口。双击进入圈选，可「自动识别」。" },
+  FILTER: { label: "过滤", group: "变换", icon: "⏷", desc: "只保留满足条件的行，例如 count > 0。" },
+  DERIVE: { label: "派生列", group: "变换", icon: "ƒ", desc: "用表达式新增或覆盖列，例如 hp = int(double(baseHp) * 1.5)。" },
+  SELECT_RENAME: { label: "选列改名", group: "变换", icon: "☰", desc: "挑选需要的列、改列名、调整顺序。" },
+  UNION: { label: "合并", group: "变换", icon: "∪", desc: "把多条结构相近的数据上下拼接（按列名对齐）。" },
+  LOOKUP: { label: "查表映射", group: "变换", icon: "⇄", desc: "用一张字典表把编码翻译成名称，例如道具 ID → 道具名。" },
+  JOIN: { label: "关联", group: "关联", icon: "⋈", desc: "两份数据按键左右关联（类似 SQL JOIN），例如奖励明细关联道具表。" },
+  VALIDATOR: { label: "校验", group: "校验", icon: "✓", desc: "按规则检查数据：必填、唯一、范围、引用存在、与汇总对账等；不通过的行进「被拒」端口。" },
+  SINK: { label: "输出到业务表", group: "输出", icon: "⛁", desc: "把数据写入一张 MySQL 业务表：选表、映射字段、选主键。" },
 };
 
 export const SHAPES: { value: string; label: string }[] = [

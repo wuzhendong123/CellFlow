@@ -27,6 +27,49 @@ import SheetPane, { Overlay } from "./SheetPane";
 type Layout = "canvas" | "lr" | "tb";
 const LAYOUT_KEY = "cellflow.layout";
 
+/** 上手指引：按方案当前状态列出下一步，每步一个直接可点的动作。 */
+function GettingStarted({ dsl, fileName, job, fresh, published, onAddSource, onAddSink, onPreview, onSelect }: any) {
+  const srcs = dsl.nodes.filter((n: DslNode) => n.type === "EXCEL_SOURCE");
+  const sinks = dsl.nodes.filter((n: DslNode) => n.type === "SINK");
+  const regions = srcs.reduce((a: number, n: DslNode) => a + (n.config.regions || []).length, 0);
+  const unbound = sinks.find((n: DslNode) => !n.config.binding?.table);
+  const steps = [
+    { done: !!fileName, title: "上传样例文件", tip: "点左上角「上传 / 更换」，用一份真实的 Excel 作为配置样例。" },
+    { done: regions > 0, title: "圈选表格区域", tip: "打开 Excel 源的分屏，点「自动识别」一键切出所有表格，再逐个调整形态和字段；也可以手工框选。",
+      action: <Button size="small" onClick={onAddSource}>{srcs.length ? "打开圈选" : "添加 Excel 源并圈选"}</Button> },
+    { done: dsl.nodes.some((n: DslNode) => !["EXCEL_SOURCE", "SINK"].includes(n.type)), optional: true, title: "加工数据（可选）",
+      tip: "从左侧点击添加过滤、派生列、关联、校验等节点，从上游节点右侧的圆点拖线到它的输入端口。选中任意节点可在右侧看到它的输出预览。" },
+    { done: sinks.length > 0 && !unbound, title: "输出到业务表", tip: "添加「输出到业务表」节点，连上数据，在右侧「绑定目标表」里选表、映射字段、选主键。",
+      action: unbound ? <Button size="small" onClick={() => onSelect(unbound.id)}>去绑定</Button> : sinks.length ? null : <Button size="small" onClick={onAddSink}>添加输出节点</Button> },
+    { done: fresh && !(job?.issues?.error > 0), title: "预览检查结果", tip: "点「预览」用样例文件跑一遍；问题会列在下方，点击可定位到 Excel 单元格。",
+      action: <Button size="small" onClick={onPreview}>预览</Button> },
+    { done: published, title: "发布", tip: "右上角「发布…」，之后业务服务就能通过 Open API 提交文件了。" },
+  ];
+  const next = steps.findIndex((s) => !s.done && !s.optional);
+  return (
+    <div id="getting-started" style={{ marginTop: 12 }}>
+      <h4 style={{ marginBottom: 6 }}>上手指引</h4>
+      {steps.map((s, i) => (
+        <div key={s.title} style={{ display: "flex", gap: 8, padding: "6px 8px", marginBottom: 4, borderRadius: 4, background: i === next ? "#e6f4ff" : undefined }}>
+          <span style={{ width: 18, color: s.done ? "#52c41a" : "#999" }}>{s.done ? "✓" : i + 1}</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: i === next ? 600 : 400 }}>{s.title}</div>
+            {(i === next || (!s.done && s.optional)) && <div className="cf-muted">{s.tip}</div>}
+            {i === next && s.action && <div style={{ marginTop: 4 }}>{s.action}</div>}
+          </div>
+        </div>
+      ))}
+      <div className="cf-muted" style={{ marginTop: 6 }}>表达式怎么写：选中派生列 / 过滤 / 校验节点，点表达式框下方的「语法帮助」；上方「可用字段」可点击插入。</div>
+    </div>
+  );
+}
+
+/** 影响计算结果的部分（不含节点位置），用于判断试跑结果是否过期。 */
+function dslSig(d: Dsl | null | undefined): string {
+  if (!d) return "";
+  return JSON.stringify([d.nodes.map((n) => [n.id, n.type, n.config]), d.edges.map((e) => [e.source, e.target])]);
+}
+
 function loadLayout(): { mode: Layout; ratio: number } {
   try {
     const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}");
@@ -142,6 +185,9 @@ function Inner({ pipeline, reload }: Props) {
   const [focusRange, setFocusRange] = useState<{ range: RangeJson; nonce: number } | null>(null);
   const [highlight, setHighlight] = useState<{ cell: string; nonce: number } | null>(null);
   const [job, setJob] = useState<any>(null);
+  const [jobSig, setJobSig] = useState("");
+  const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
+  const [focusData, setFocusData] = useState<{ node: string; nonce: number } | null>(null);
   const [issues, setIssues] = useState<any[]>([]);
   const [regionPreview, setRegionPreview] = useState<any>(null);
   const [collapsed, setCollapsed] = useState(true);
@@ -265,6 +311,7 @@ function Inner({ pipeline, reload }: Props) {
   const rfNodes: Node<NodeData>[] = dsl.nodes.map((n, i) => ({
     id: n.id,
     type: "cf",
+    measured: measured[n.id],
     position: n.position || { x: 80 + (i % 4) * 260, y: 60 + Math.floor(i / 4) * 200 },
     selected: n.id === selected,
     data: { node: n, errors: issueCount[n.id]?.e || 0, warns: issueCount[n.id]?.w || 0, rows: job?.metrics?.nodes?.[n.id]?.rows, invalid: invalid.has(n.id), flash: flash === n.id, onMenu },
@@ -296,25 +343,35 @@ function Inner({ pipeline, reload }: Props) {
     change({ ...dsl, edges: [...dsl.edges, { id, source: { nodeId: c.source, portId: c.sourceHandle! }, target: { nodeId: c.target, portId: c.targetHandle! } }] });
   };
 
+  const addNode = (t: NodeType, pos?: { x: number; y: number }) => {
+    const cur = dslRef.current;
+    const id = newId(t === "EXCEL_SOURCE" ? "src" : t.toLowerCase(), cur.nodes.map((n) => n.id));
+    const cfg = defaultConfig(t);
+    if (t === "EXCEL_SOURCE" && fileInfo?.sheets?.[0]) cfg.sheet.value = fileInfo.sheets[0].name;
+    if (t === "SINK") cfg.dataset = id.replace(/[^A-Za-z0-9_]/g, "_");
+    // 点击添加时放在已有节点右侧，避免重叠
+    const at = pos || { x: 80 + Math.max(0, ...cur.nodes.map((n) => (n.position?.x || 0))) + (cur.nodes.length ? 280 : 0), y: 80 };
+    change({ ...cur, nodes: [...cur.nodes, { id, type: t, label: NODE_META[t].label, position: at, config: cfg }] });
+    setSelected(id);
+    if (!pos) setTimeout(() => rf.fitView({ maxZoom: 1, duration: 300 }), 60); // 点击添加的节点可能在视野外
+    return id;
+  };
+
   const onDrop = (ev: React.DragEvent) => {
     ev.preventDefault();
     const t = ev.dataTransfer.getData("application/cellflow") as NodeType;
     if (!t) return;
-    const pos = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-    const id = newId(t === "EXCEL_SOURCE" ? "src" : t.toLowerCase(), dsl.nodes.map((n) => n.id));
-    const cfg = defaultConfig(t);
-    if (t === "EXCEL_SOURCE" && fileInfo?.sheets?.[0]) cfg.sheet.value = fileInfo.sheets[0].name;
-    if (t === "SINK") cfg.dataset = id.replace(/[^A-Za-z0-9_]/g, "_");
-    change({ ...dsl, nodes: [...dsl.nodes, { id, type: t, label: NODE_META[t].label, position: pos, config: cfg }] });
-    setSelected(id);
+    addNode(t, rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY }));
   };
 
   // ---------- 试跑 ----------
   const runTest = async (preview: boolean, fileId?: number, until?: string) => {
     setRunning(true);
     try {
+      const sig = dslSig(dslRef.current);
       const j = await post("/api/jobs/test", { pipelineId: pid, preview, fileId, untilNodeId: until, dsl: dslRef.current });
       setJob(j);
+      setJobSig(sig);
       const iss = await get(`/api/jobs/${j.jobId}/issues?limit=500`);
       setIssues(iss.rows);
       setCollapsed(false);
@@ -411,8 +468,11 @@ function Inner({ pipeline, reload }: Props) {
 
   const canvas = (
     <div className="cf-canvas" ref={wrapper} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
-      <ReactFlow nodes={rfNodes} edges={rfEdges} nodeTypes={nodeTypes} fitView minZoom={0.2}
+      <ReactFlow nodes={rfNodes} edges={rfEdges} nodeTypes={nodeTypes} fitView fitViewOptions={{ maxZoom: 1 }} minZoom={0.2}
         onNodesChange={(chs) => {
+          // React Flow 12 受控模式：必须回填测得的尺寸，否则节点一直是 visibility: hidden
+          const dims = chs.filter((c: any) => c.type === "dimensions" && c.dimensions);
+          if (dims.length) setMeasured((m) => ({ ...m, ...Object.fromEntries(dims.map((c: any) => [c.id, c.dimensions])) }));
           const moves = chs.filter((c: any) => c.type === "position" && c.position);
           if (moves.length) change({ ...dsl, nodes: dsl.nodes.map((n) => { const m: any = moves.find((c: any) => c.id === n.id); return m ? { ...n, position: m.position } : n; }) }, false);
           const sel = chs.find((c: any) => c.type === "select" && c.selected) as any;
@@ -437,8 +497,9 @@ function Inner({ pipeline, reload }: Props) {
         <div key={g}>
           {layout.mode === "canvas" && <div className="cf-muted" style={{ margin: "6px 0 4px" }}>{g}</div>}
           {(Object.keys(NODE_META) as NodeType[]).filter((t) => NODE_META[t].group === g).map((t) => (
-            <Tooltip key={t} title={layout.mode !== "canvas" ? NODE_META[t].label : ""} placement="right">
-              <div className="item" draggable data-testid={`palette-${t}`} onDragStart={(e) => e.dataTransfer.setData("application/cellflow", t)}>
+            <Tooltip key={t} title={<div><b>{NODE_META[t].label}</b><div>{NODE_META[t].desc}</div><div style={{ opacity: 0.7 }}>点击添加，或拖到画布指定位置</div></div>} placement="right">
+              <div className="item" draggable data-testid={`palette-${t}`} onDragStart={(e) => e.dataTransfer.setData("application/cellflow", t)}
+                onClick={() => addNode(t)}>
                 {NODE_META[t].icon} {layout.mode === "canvas" ? NODE_META[t].label : ""}
               </div>
             </Tooltip>
@@ -462,6 +523,8 @@ function Inner({ pipeline, reload }: Props) {
           }} />
       ) : selNode ? (
         <NodeConfig node={selNode} dsl={dsl} analysis={analysis} pipeline={pipeline} sampleRows={sampleRowsOf}
+          job={job} stale={!!job && jobSig !== dslSig(dsl)} running={running} onRunUntil={(id) => runTest(true, undefined, id)}
+          onShowAll={(id) => { setCollapsed(false); setFocusData({ node: id, nonce: Date.now() }); }}
           onChange={(cfg) => updateNode(selNode.id, { config: cfg })} onLabel={(l) => updateNode(selNode.id, { label: l })} />
       ) : (
         <div>
@@ -470,7 +533,9 @@ function Inner({ pipeline, reload }: Props) {
           {errCount > 0 && <div className="cf-err">静态校验：{errCount} 个错误</div>}
           {(analysis?.errors || []).slice(0, 10).map((e, i) => <div key={i} className="cf-err" style={{ fontSize: 12 }}>· {e.message}</div>)}
           {job && <p>最近试跑：任务 #{job.jobId}，错误 {job.issues.error || 0}，警告 {job.issues.warn || 0}</p>}
-          <p className="cf-muted">从左侧拖入节点；双击源节点进入分屏圈选区域；从输出端口拖线到输入端口编排流程。</p>
+          <GettingStarted dsl={dsl} fileName={fileInfo?.fileName} job={job} fresh={!!job && jobSig === dslSig(dsl)} published={!!pipeline.publishedRev}
+            onAddSource={() => { const s0 = dsl.nodes.find((n) => n.type === "EXCEL_SOURCE"); openSplit(s0 ? s0.id : addNode("EXCEL_SOURCE")); }}
+            onAddSink={() => addNode("SINK")} onPreview={() => runTest(true)} onSelect={(id: string) => setSelected(id)} />
         </div>
       )}
     </div>
@@ -535,7 +600,7 @@ function Inner({ pipeline, reload }: Props) {
         </Tooltip>
       </div>
       {body}
-      <ResultPanel job={job} issues={issues} dsl={dsl} selectedNode={selected} regionPreview={regionPreview} collapsed={collapsed}
+      <ResultPanel job={job} issues={issues} dsl={dsl} selectedNode={selected} focusData={focusData} regionPreview={regionPreview} collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)} onIssue={(i) => { if (i.cell) locate(`${i.sheet}!${i.cell}`, i.node); else { setFlash(i.node); setTimeout(() => setFlash(null), 2200); } }}
         onCell={(a) => locate(a)} />
     </div>

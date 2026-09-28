@@ -103,8 +103,10 @@ def analyze(dsl: dict) -> Analysis:
         for p, spec in input_ports(n).items():
             es = incoming.get((n["id"], p), [])
             if not es and not spec.get("optional"):
-                label = "引用输入" if spec.get("kind") == "REF" else "输入端口"
-                a.errors.append({"code": "PORT_NOT_CONNECTED", "message": f"节点「{n.get('label', n['id'])}」的{label} {p} 未连线", "node": n["id"]})
+                names = {"in": "输入", "in_left": "左", "in_right": "右", "in_main": "主数据", "in_dict": "字典", "in_params": "参数"}
+                port = names.get(p) or (f"引用 {p[7:]}" if p.startswith("in_ref_") else p)
+                a.errors.append({"code": "PORT_NOT_CONNECTED", "node": n["id"], "message":
+                                 f"节点「{n.get('label', n['id'])}」的「{port}」端口还没有连线：从上游节点右侧的圆点拖线到这个端口"})
             if len(es) > 1 and not spec.get("multi"):
                 a.errors.append({"code": "DSL_INVALID", "message": f"节点「{n.get('label', n['id'])}」的端口 {p} 只能接一条线", "node": n["id"]})
     # SINK 数据集名唯一

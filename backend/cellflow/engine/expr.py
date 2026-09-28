@@ -244,6 +244,7 @@ logging.getLogger("celpy").setLevel(logging.CRITICAL)  # 逐行求值错误由�
 
 class _Runner:
     def __init__(self, ast):
+        self._ast = ast
         try:
             self._r = celpy.CompiledRunner(_ENV, ast, _FUNCS)
             self.compiled = True
@@ -258,7 +259,17 @@ class _Runner:
             try:
                 return self._r.evaluate(activation)
             except celpy.CELEvalError as e:
-                raise _unwrap(e) from None
+                inner = _unwrap(e)
+                if not _is_transpile_gap(inner):
+                    raise inner from None
+        # 转译后的代码找不到部分自定义函数（按模块路径引用）：此表达式改用解释执行
+        self._r = celpy.InterpretedRunner(_ENV, self._ast, _FUNCS)
+        self.compiled = False
+        return self._r.evaluate(activation)
+
+
+def _is_transpile_gap(e: celpy.CELEvalError) -> bool:
+    return len(e.args) > 1 and e.args[1] is NameError or "is not defined" in str(e.args[0] if e.args else "")
 
 
 def _unwrap(e: celpy.CELEvalError) -> celpy.CELEvalError:

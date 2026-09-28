@@ -9,6 +9,7 @@ interface Props {
   issues: any[];
   dsl: Dsl;
   selectedNode: string | null;
+  focusData?: { node: string; nonce: number } | null;
   regionPreview: any | null;
   collapsed: boolean;
   onToggle: () => void;
@@ -17,7 +18,7 @@ interface Props {
 }
 
 /** P3-4 试跑结果面板（F6-7、F8）。 */
-export default function ResultPanel({ job, issues, dsl, selectedNode, regionPreview, collapsed, onToggle, onIssue, onCell }: Props) {
+export default function ResultPanel({ job, issues, dsl, selectedNode, focusData, regionPreview, collapsed, onToggle, onIssue, onCell }: Props) {
   const [tab, setTab] = useState("data");
   const [target, setTarget] = useState<string | null>(null);
   const [page, setPage] = useState<any>(null);
@@ -29,12 +30,16 @@ export default function ResultPanel({ job, issues, dsl, selectedNode, regionPrev
     () => dsl.nodes.flatMap((n) => outputPorts(n).map((p) => ({ value: `${n.id}|${p.id}`, label: `${n.label || n.id} → ${p.label}${p.side ? "（侧输出）" : ""}` }))),
     [dsl],
   );
-  useEffect(() => {
-    if (selectedNode) {
-      const first = ports.find((p) => p.value.startsWith(selectedNode + "|"));
-      if (first) setTarget(first.value);
-    }
-  }, [selectedNode]);
+  // 选中节点时，数据页签切到该节点的第一个输出端口
+  const showNode = (nodeId: string) => {
+    const first = ports.find((p) => p.value.startsWith(nodeId + "|"));
+    if (!first) return;
+    setTarget(first.value);
+    setOffset(0);
+    if (job) setTab("data");
+  };
+  useEffect(() => { if (selectedNode) showNode(selectedNode); }, [selectedNode]);
+  useEffect(() => { if (focusData) showNode(focusData.node); }, [focusData?.nonce]);
   useEffect(() => { if (regionPreview) setTab("region"); }, [regionPreview]);
   useEffect(() => {
     if (!job || !target) { setPage(null); return; }

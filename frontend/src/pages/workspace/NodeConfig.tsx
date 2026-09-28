@@ -1,8 +1,8 @@
-import { Alert, App, Button, Card, Checkbox, Drawer, Input, InputNumber, Radio, Select, Space, Table, Tag, Typography } from "antd";
+import { Alert, App, Button, Card, Checkbox, Drawer, Input, InputNumber, Radio, Select, Space, Table, Tag, Tooltip } from "antd";
 import { useEffect, useState } from "react";
 import { get, post } from "../../api";
-import { Dsl, DslNode } from "../../dsl";
-import ExprEditor from "./ExprEditor";
+import { Dsl, DslNode, outputPorts } from "../../dsl";
+import ExprEditor, { insertIntoExpr } from "./ExprEditor";
 
 export interface Analysis {
   ok: boolean;
@@ -19,6 +19,11 @@ interface Props {
   sampleRows: (nodeId: string, portId: string) => any[];
   onChange: (cfg: any) => void;
   onLabel: (label: string) => void;
+  job?: any;
+  stale?: boolean;
+  running?: boolean;
+  onRunUntil?: (nodeId: string) => void;
+  onShowAll?: (nodeId: string) => void;
 }
 
 export function inputSchema(dsl: Dsl, analysis: Analysis | null, nodeId: string, portId: string) {
@@ -38,7 +43,7 @@ function paramsCtx(dsl: Dsl, analysis: Analysis | null, node: DslNode) {
 }
 
 /** P3-2 节点配置面板（右侧 E 区）。 */
-export default function NodeConfig({ node, dsl, analysis, pipeline, sampleRows, onChange, onLabel }: Props) {
+export default function NodeConfig({ node, dsl, analysis, pipeline, sampleRows, onChange, onLabel, job, stale, running, onRunUntil, onShowAll }: Props) {
   const cfg = node.config;
   const set = (p: any) => onChange({ ...cfg, ...p });
   const errs = (analysis?.errors || []).filter((e) => e.node === node.id);
@@ -48,6 +53,10 @@ export default function NodeConfig({ node, dsl, analysis, pipeline, sampleRows, 
   const paramSchema = inputSchema(dsl, analysis, node.id, "in_params");
   const edge = dsl.edges.find((e) => e.target.nodeId === node.id && e.target.portId === mainPort);
   const rows = edge ? sampleRows(edge.source.nodeId, edge.source.portId) : [];
+  // 参数端口的单行样例：表达式预览用真实参数值（否则 params.x 一律为空）
+  const paramEdge = dsl.edges.find((e) => e.target.nodeId === node.id && e.target.portId === "in_params");
+  const paramRow = paramEdge ? sampleRows(paramEdge.source.nodeId, paramEdge.source.portId)[0] : undefined;
+  const pv = paramRow ? Object.fromEntries(Object.keys(cfg.params || {}).map((a) => [a, paramRow])) : undefined;
 
   const paramBox = (node.type === "FILTER" || node.type === "DERIVE" || node.type === "VALIDATOR") && (
     <Card size="small" title="参数" style={{ marginBottom: 8 }}>
@@ -72,29 +81,108 @@ export default function NodeConfig({ node, dsl, analysis, pipeline, sampleRows, 
       {errs.map((e, i) => <Alert key={i} type="error" showIcon message={e.message} style={{ marginBottom: 4 }} className="node-error" />)}
       {warns.map((e, i) => <Alert key={"w" + i} type="warning" showIcon message={e.message} style={{ marginBottom: 4 }} />)}
       {main && (
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }} ellipsis={{ rows: 2, expandable: true }}>
-          输入字段：{main.columns.map((c) => `${c.field}(${c.type})`).join("、")}
-        </Typography.Paragraph>
+        <FieldPalette columns={main.columns} rows={rows} params={paramsCtx(dsl, analysis, node)} pv={pv}
+          insertable={node.type === "FILTER" || node.type === "DERIVE" || node.type === "VALIDATOR"} />
       )}
       {paramBox}
       {node.type === "FILTER" && (
         <Card size="small" title="过滤条件">
-          <ExprEditor id="filter-expr" value={cfg.expr || ""} onChange={(v) => set({ expr: v })} ctx={{ fields: fieldsOf(main), params: paramsCtx(dsl, analysis, node), sampleRows: rows, expect: "bool" }} />
+          <ExprEditor id="filter-expr" value={cfg.expr || ""} onChange={(v) => set({ expr: v })} ctx={{ fields: fieldsOf(main), params: paramsCtx(dsl, analysis, node), sampleRows: rows, paramValues: pv, expect: "bool" }} />
         </Card>
       )}
-      {node.type === "DERIVE" && <DeriveForm cfg={cfg} set={set} main={main} params={paramsCtx(dsl, analysis, node)} rows={rows} />}
+      {node.type === "DERIVE" && <DeriveForm cfg={cfg} set={set} main={main} params={paramsCtx(dsl, analysis, node)} rows={rows} pv={pv} />}
       {node.type === "SELECT_RENAME" && <SelectForm cfg={cfg} set={set} main={main} />}
       {node.type === "UNION" && <span className="cf-muted">把多条结构相近的流连到「输入」端口，按字段名对齐，缺失字段为空。</span>}
       {node.type === "LOOKUP" && <LookupForm cfg={cfg} set={set} main={main} dict={inputSchema(dsl, analysis, node.id, "in_dict")} />}
       {node.type === "JOIN" && <JoinForm cfg={cfg} set={set} left={main} right={inputSchema(dsl, analysis, node.id, "in_right")} />}
-      {node.type === "VALIDATOR" && <ValidatorForm node={node} cfg={cfg} set={set} main={main} dsl={dsl} analysis={analysis} params={paramsCtx(dsl, analysis, node)} rows={rows} />}
+      {node.type === "VALIDATOR" && <ValidatorForm node={node} cfg={cfg} set={set} main={main} dsl={dsl} analysis={analysis} params={paramsCtx(dsl, analysis, node)} rows={rows} pv={pv} />}
       {node.type === "SINK" && <SinkForm node={node} cfg={cfg} set={set} main={main} pipeline={pipeline} dsl={dsl} />}
       {paramSchema === null && node.type === "DERIVE" && null}
+      {node.type !== "SINK" && onRunUntil && (
+        <NodePreview node={node} job={job} stale={stale} running={running} onRun={() => onRunUntil(node.id)} onShowAll={() => onShowAll?.(node.id)} />
+      )}
     </div>
   );
 }
 
-function DeriveForm({ cfg, set, main, params, rows }: any) {
+const sampleText = (vals: any[]) => {
+  const xs = vals.filter((v) => v !== null && v !== undefined).slice(0, 3).map((v) => (typeof v === "object" ? JSON.stringify(v) : String(v)));
+  return xs.length ? `样例：${xs.join("、")}` : "暂无样例（先预览或试跑）";
+};
+
+/** 可用字段面板：输入字段与参数字段（类型 + 样例值），点击插入到最近使用的表达式输入框。 */
+function FieldPalette({ columns, rows, params, pv, insertable }: any) {
+  const { message } = App.useApp();
+  const insert = (text: string) => {
+    if (!insertable) return;
+    if (!insertIntoExpr(text)) message.info("先点一下要编辑的表达式输入框，再点字段");
+  };
+  const chip = (text: string, label: string, type: string, tip: string) => (
+    <Tooltip key={text} title={<div><div className="cf-mono">{text}</div><div>{tip}</div></div>}>
+      <Tag className="field-chip" style={{ cursor: insertable ? "pointer" : "default", marginBottom: 4 }} onClick={() => insert(text)}>
+        {label}<span className="cf-muted" style={{ marginLeft: 4 }}>{type}</span>
+      </Tag>
+    </Tooltip>
+  );
+  const aliases = Object.entries<Record<string, string>>(params || {});
+  return (
+    <Card size="small" id="field-palette" style={{ marginBottom: 8 }}
+      title={<span>可用字段{insertable && <span className="cf-muted" style={{ fontWeight: 400, marginLeft: 6 }}>点击插入到表达式</span>}</span>}>
+      <div>{columns.map((c: any) => chip(c.field, c.field, c.type, sampleText((rows || []).map((r: any) => r?.[c.field]))))}</div>
+      {aliases.map(([alias, fields]) => (
+        <div key={alias} style={{ marginTop: 4 }}>
+          <span className="cf-muted" style={{ marginRight: 4 }}>参数 {alias}：</span>
+          {Object.entries(fields).map(([f, t]) => chip(`params.${alias}.${f}`, f, t, sampleText([pv?.[alias]?.[f]])))}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+const fmtCell = (v: any) => (v === null || v === undefined ? <span className="cf-muted">∅</span> : typeof v === "object" ? JSON.stringify(v) : String(v));
+
+/** 节点输出预览：显示最近一次试跑中本节点各输出端口的前 5 行，便于确认处理结果。 */
+function NodePreview({ node, job, stale, running, onRun, onShowAll }: any) {
+  const ports = outputPorts(node);
+  const [pages, setPages] = useState<Record<string, any>>({});
+  useEffect(() => {
+    setPages({});
+    if (!job) return;
+    for (const p of ports) {
+      get(`/api/jobs/${job.jobId}/nodes/${node.id}/ports/${p.id}/rows?offset=0&limit=5`)
+        .then((pg) => setPages((m) => ({ ...m, [p.id]: pg })))
+        .catch(() => setPages((m) => ({ ...m, [p.id]: null })));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.jobId, node.id]);
+  const has = ports.some((p) => pages[p.id]);
+  return (
+    <Card size="small" id="node-preview" title="输出预览" style={{ marginTop: 8 }} extra={
+      <Space size={4}>
+        {has && <Button size="small" type="link" onClick={onShowAll}>查看全部</Button>}
+        <Button size="small" id="preview-until" loading={running} onClick={onRun}>{job ? "重新预览到此节点" : "预览到此节点"}</Button>
+      </Space>
+    }>
+      {stale && job && <Alert type="warning" showIcon style={{ marginBottom: 6 }} message="配置已修改，下面是修改前的结果" />}
+      {!job && <span className="cf-muted">点「预览到此节点」，用样例文件（每个区域采样）跑到这里，查看处理结果</span>}
+      {job && !has && <span className="cf-muted">本节点在最近一次试跑中没有输出（可能未运行到这里或上游出错），点「预览到此节点」</span>}
+      {ports.map((p) => {
+        const pg = pages[p.id];
+        if (!pg) return null;
+        return (
+          <div key={p.id} style={{ marginBottom: 6 }}>
+            {ports.length > 1 && <div className="cf-muted">{p.label}（{pg.total} 行）</div>}
+            {ports.length === 1 && <div className="cf-muted">共 {pg.total} 行，显示前 {pg.rows.length} 行</div>}
+            <Table size="small" pagination={false} scroll={{ x: true }} rowKey={(_, i) => String(i)} dataSource={pg.rows}
+              columns={(pg.columns || []).map((c: any) => ({ title: c.field, render: (_: any, r: any) => <span className="cf-value">{fmtCell(r.data[c.field])}</span> }))} />
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
+function DeriveForm({ cfg, set, main, params, rows, pv }: any) {
   const cols: any[] = cfg.columns || [];
   const upd = (i: number, p: any) => set({ columns: cols.map((c, j) => (j === i ? { ...c, ...p } : c)) });
   const move = (i: number, d: number) => {
@@ -119,7 +207,7 @@ function DeriveForm({ cfg, set, main, params, rows }: any) {
               <a onClick={() => i > 0 && move(i, -1)}>↑</a><a onClick={() => i < cols.length - 1 && move(i, 1)}>↓</a>
               <a onClick={() => set({ columns: cols.filter((_, j) => j !== i) })}>删除</a>
             </Space>
-            <ExprEditor id={`derive-expr-${i}`} value={c.expr || ""} onChange={(v) => upd(i, { expr: v })} ctx={{ fields: before, params, sampleRows: rows }} />
+            <ExprEditor id={`derive-expr-${i}`} value={c.expr || ""} onChange={(v) => upd(i, { expr: v })} ctx={{ fields: before, params, sampleRows: rows, paramValues: pv }} />
           </Card>
         );
       })}
@@ -221,7 +309,7 @@ const RULES = [
   ["FOREIGN_KEY", "外键"], ["EXPR", "表达式"], ["RECONCILE", "对账"], ["ROW_COUNT", "行数"],
 ];
 
-function ValidatorForm({ node, cfg, set, main, dsl, analysis, params, rows }: any) {
+function ValidatorForm({ node, cfg, set, main, dsl, analysis, params, rows, pv }: any) {
   const rules: any[] = cfg.rules || [];
   const refs: Record<string, string> = cfg.refs || {};
   const upd = (i: number, p: any) => set({ rules: rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
@@ -247,7 +335,7 @@ function ValidatorForm({ node, cfg, set, main, dsl, analysis, params, rows }: an
             <Tag>{RULES.find((x) => x[0] === r.type)?.[1]}</Tag>
             <Select size="small" value={r.severity || "ERROR"} onChange={(v) => upd(i, { severity: v })} options={[{ value: "ERROR", label: "错误" }, { value: "WARN", label: "警告" }]} />
           </Space>} extra={<a onClick={() => set({ rules: rules.filter((_, j) => j !== i) })}>删除</a>}>
-            <RuleParams r={r} upd={(p: any) => upd(i, p)} main={main} refs={refs} refSchema={refSchema} params={params} rows={rows} />
+            <RuleParams r={r} upd={(p: any) => upd(i, p)} main={main} refs={refs} refSchema={refSchema} params={params} rows={rows} pv={pv} />
             <Input size="small" style={{ marginTop: 4 }} placeholder="提示文案（可选）" value={r.message || ""} onChange={(e) => upd(i, { message: e.target.value || undefined })} />
           </Card>
         ))}
@@ -259,7 +347,7 @@ function ValidatorForm({ node, cfg, set, main, dsl, analysis, params, rows }: an
   );
 }
 
-function RuleParams({ r, upd, main, refs, refSchema, params, rows }: any) {
+function RuleParams({ r, upd, main, refs, refSchema, params, rows, pv }: any) {
   const fields = options(main);
   switch (r.type) {
     case "NOT_NULL":
@@ -282,7 +370,7 @@ function RuleParams({ r, upd, main, refs, refSchema, params, rows }: any) {
       </Space>;
     }
     case "EXPR":
-      return <ExprEditor value={r.expr || ""} onChange={(v) => upd({ expr: v })} ctx={{ fields: Object.fromEntries((main?.columns || []).map((c: any) => [c.field, c.type])), params, sampleRows: rows, expect: "bool" }} />;
+      return <ExprEditor value={r.expr || ""} onChange={(v) => upd({ expr: v })} ctx={{ fields: Object.fromEntries((main?.columns || []).map((c: any) => [c.field, c.type])), params, sampleRows: rows, paramValues: pv, expect: "bool" }} />;
     case "RECONCILE": {
       const alias = Object.keys(params)[0];
       return <Space wrap>明细 <Input size="small" className="cf-mono" style={{ width: 110 }} placeholder="sum(count)" value={r.detailAgg || ""} onChange={(e) => upd({ detailAgg: e.target.value })} />

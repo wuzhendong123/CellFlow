@@ -376,3 +376,43 @@ def test_expr_compiled_runner_matches_interpreter_and_is_thread_safe():
     for t in ts:
         t.join()
     assert not errors
+
+
+def test_expression_check_preview_uses_param_values():
+    """表达式快速预览带上参数行样例：params.x 不再一律为空。"""
+    from fastapi.testclient import TestClient
+
+    from cellflow.api.main import create_app
+
+    c = TestClient(create_app())
+    body = {"expr": "int(double(baseHp) * params.global.hpRate)", "fields": {"baseHp": "int"},
+            "params": {"global": {"hpRate": "float"}}, "sampleRows": [{"baseHp": 100}, {"baseHp": 60}]}
+    r = c.post("/api/expressions/check", json={**body, "paramValues": {"global": {"hpRate": 1.5}}}).json()["data"]
+    assert [x["value"] for x in r["preview"]] == [150, 90]
+    r = c.post("/api/expressions/check", json=body).json()["data"]
+    assert [x["value"] for x in r["preview"]] == [None, None]  # 没有参数样例时仍按空值传递
+
+
+def test_every_catalog_function_same_under_compiled_runner():
+    """函数目录里每个函数：转译执行（必要时自动回退）与解释执行结果一致。"""
+    import datetime as dt
+
+    from cellflow.engine import expr as E
+
+    f = {"s": E.FieldInfo("string"), "n": E.FieldInfo("int"), "x": E.FieldInfo("float"), "d": E.FieldInfo("date")}
+    row = {"s": " a,b ", "n": 7, "x": 2.345, "d": dt.date(2026, 3, 1)}
+    calls = {
+        "len": "len(s)", "upper": "upper(s)", "lower": "lower(s)", "trim": "trim(s)", "replace": "replace(s, 'a', 'z')",
+        "split": "split(s, ',')", "join": "join(['a', 'b'], '-')", "format": "format('{}-{}', s, n)",
+        "regexMatch": "regexMatch(trim(s), '^a,b$')", "abs": "abs(n - 10)", "round": "round(x, 2)", "floor": "floor(x)",
+        "ceil": "ceil(x)", "min": "min(n, 3)", "max": "max(n, 3)", "clamp": "clamp(n, 1, 5)", "coalesce": "coalesce(s, 'z')",
+        "isNull": "isNull(s)", "decimal": "decimal(x, 1)", "date": "date('2026-01-01')", "datetime": "datetime('2026-01-01 08:00:00')",
+        "addDays": "addDays(d, 3)", "diffDays": "diffDays(d, date('2026-01-01'))", "formatDate": "formatDate(d, '%Y/%m/%d')",
+        "sum": "sum([1, 2, 3])", "substr": "substr(s, 1, 2)",
+    }
+    assert set(calls) == set(E.FUNCTIONS), set(E.FUNCTIONS) ^ set(calls)
+    for name, x in calls.items():
+        p = E.compile_expr(x, f)
+        interp = E.celpy.InterpretedRunner(E._ENV, E._ENV.compile(x), E._FUNCS)
+        act = {k: E.to_cel(v) for k, v in row.items()}
+        assert p.evaluate(row) == E.from_cel(interp.evaluate(act)), name
