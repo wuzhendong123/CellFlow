@@ -999,7 +999,7 @@ def run_derive(cfg, inputs, ctx):
 | POST | `/api/regions/suggest` | 按框选范围推荐形态/定位器/表头 |
 | GET | `/api/datasources/{id}/tables/{table}` | 读取目标表结构（列、类型、主键/唯一键、自增、触发器、被引用外键） |
 | POST | `/api/pipelines/{id}/bindings/check` | 校验字段映射与写入策略可行性 |
-| POST | `/api/jobs/test` | 试跑（`mode=TEST`，`sampleRows?`、`untilNodeId?`），永不写表 |
+| POST | `/api/jobs/test` | 试跑（`mode=TEST`，`fileId`、`sampleRows?`、`untilNodeId?`），永不写表；`fileId` 可以是样例文件，也可以取自任一历史任务（W2） |
 | GET | `/api/jobs/{jobId}/nodes/{nodeId}/ports/{portId}/rows` | 分页查看节点输出（含 `_lineage`） |
 | POST | `/api/pipelines/{id}/revisions/{rev}/regression` | 用最近 N 个成功任务的文件回归，返回新旧版本结果差异 |
 | POST | `/api/pipelines/{id}/revisions/{rev}/publish` | 🔒 发布方案版本 |
