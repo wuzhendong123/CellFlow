@@ -14,3 +14,4 @@ dump.rdb
 !backend/tests/**/*.xlsx
 frontend/e2e/.data/
 frontend/e2e/.results/
+/demo/

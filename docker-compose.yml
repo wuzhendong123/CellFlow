@@ -1,0 +1,78 @@
+# CellFlow 本地一键启动（./cellflow.sh up）：MySQL 8 + Redis + 迁移 + API（含控制台）+ Worker
+# 所有口令均为本地开发占位值，仅用于本机，请勿用于任何共享环境
+name: cellflow
+
+x-app-env: &app-env
+  CF_META_DB_URL: mysql+pymysql://cellflow:change_me@mysql:3306/cellflow_meta?charset=utf8mb4
+  CF_REDIS_URL: redis://redis:6379/0
+  CF_STORAGE_BACKEND: local
+  CF_STORAGE_LOCAL_DIR: /data/storage
+  CF_OP_TOKEN: ${CF_OP_TOKEN:-local-op-token}
+  # 数据源 / 调用方「引用名」对应的真实值（CF_REF_<引用名>），控制台里只填引用名
+  CF_REF_BIZ_MYSQL: mysql+pymysql://cellflow:change_me@mysql:3306
+  CF_REF_DEMO_APP_SECRET: ${CF_DEMO_APP_SECRET:-local-demo-secret}
+  # 测试（./cellflow.sh test）使用
+  CF_TEST_MYSQL_URL: mysql+pymysql://cellflow:change_me@mysql:3306
+  CF_TEST_REDIS_URL: redis://redis:6379/15
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: change_me_root
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--log-bin-trust-function-creators=1"]
+    ports: ["${CF_MYSQL_PORT:-13306}:3306"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./deploy/mysql-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pchange_me_root"]
+      interval: 3s
+      retries: 40
+
+  redis:
+    image: redis:7
+    ports: ["${CF_REDIS_PORT:-16379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    image: cellflow:local
+    environment: *app-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      mysql: {condition: service_healthy}
+
+  api:
+    image: cellflow:local
+    pull_policy: never
+    environment: *app-env
+    ports: ["${CF_PORT:-8000}:8000"]
+    volumes:
+      - storage:/data/storage
+      - ./demo:/demo
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 3s
+      retries: 40
+
+  worker:
+    image: cellflow:local
+    pull_policy: never
+    environment: *app-env
+    command: ["arq", "cellflow.runtime.worker.WorkerSettings"]
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+volumes:
+  mysql-data:
+  storage:

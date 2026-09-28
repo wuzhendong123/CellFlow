@@ -1,0 +1,15 @@
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+frontend/dist
+frontend/e2e/.data
+frontend/e2e/.results
+data
+demo
+dump.rdb
+.env
+.git
+*.xlsx
+!backend/tests/**/*.xlsx

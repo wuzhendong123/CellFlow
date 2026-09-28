@@ -5,7 +5,7 @@ CREATE USER IF NOT EXISTS 'cellflow'@'%' IDENTIFIED WITH mysql_native_password B
 GRANT ALL ON cellflow_meta.* TO 'cellflow'@'%';
 GRANT ALL ON cellflow_biz.* TO 'cellflow'@'%';
 -- 测试会话会创建 cellflow_test_* 临时库
-GRANT CREATE, DROP ON *.* TO 'cellflow'@'%';
+GRANT CREATE, DROP, TRIGGER ON *.* TO 'cellflow'@'%';
 GRANT ALL ON `cellflow_test%`.* TO 'cellflow'@'%';
 -- 端到端验收（frontend/e2e/run.sh）使用 cellflow_e2e_* 库
 GRANT ALL ON `cellflow_e2e%`.* TO 'cellflow'@'%';
