@@ -216,7 +216,7 @@ function Releases({ p, reload }: { p: any; reload: () => void }) {
         expandable={{ expandedRowRender: (r: any) => <Changes url={`/api/releases/${r.id}/changes`} tables={r.tables} />, rowExpandable: (r: any) => r.kind !== "BASELINE" }}
         columns={[
           { title: "发布", dataIndex: "id", render: (v, r: any) => <span>#{v} {r.live && <Tag color="green">生效中</Tag>}</span> },
-          { title: "类型", dataIndex: "kind", render: (v, r: any) => <span><ReleaseKind s={v} />{r.rollbackTo ? <span className="cf-muted">→ #{r.rollbackTo}</span> : null}</span> },
+          { title: "类型", dataIndex: "kind", render: (v, r: any) => <span><ReleaseKind s={v} />{r.strategy === "PARTITION" && <Tag>按分区</Tag>}{r.undoOf ? <span className="cf-muted">撤销 #{r.undoOf}</span> : r.rollbackTo ? <span className="cf-muted">→ #{r.rollbackTo}</span> : null}</span> },
           { title: "状态", dataIndex: "status", render: (v) => v === "PUBLISHED" ? "" : <Tag color="red">{v}</Tag> },
           { title: "来源任务", dataIndex: "jobId", render: (v) => v ? <a onClick={() => navigate(`/jobs/${v}`)}>#{v}</a> : "—" },
           { title: "操作人", dataIndex: "operator" },
@@ -227,7 +227,19 @@ function Releases({ p, reload }: { p: any; reload: () => void }) {
           </> },
           { title: "理由", dataIndex: "reason", ellipsis: true },
           {
-            title: "", render: (_: any, r: any) => (
+            title: "", render: (_: any, r: any) => r.strategy === "PARTITION" ? (
+              r.undone ? <span className="cf-muted">已撤销</span> : r.undoable ? (
+                <Button size="small" className="undo-btn" title="把这次写入涉及的分区恢复成写入前的数据，其他分区不动"
+                  onClick={async () => {
+                    const parts = Object.entries<any>(r.partitions || {}).map(([t, v]) => `${t}：${v.map((x: any[]) => x.join("/")).join("，")}`).join("；");
+                    try {
+                      const res = await opCall({ title: `撤销发布 #${r.id}`, reasonRequired: true, summary: `把以下分区恢复成发布 #${r.id} 写入前的数据：${parts}` },
+                        "POST", `/api/pipelines/${p.id}/releases/${r.id}/undo`, (a) => ({ reason: a.reason }));
+                      if (res) { message.success(`已撤销，新发布 #${res.releaseId}`); load(); reload(); }
+                    } catch (e) { message.error((e as Error).message); }
+                  }}>撤销此次写入</Button>
+              ) : null
+            ) : (
               <Button size="small" className="rollback-btn" disabled={r.live || !r.available} title={!r.available && r.status === "PUBLISHED" ? "已超过保留期" : ""}
                 onClick={() => setTarget(r)}>回滚到此版本</Button>
             ),

@@ -275,13 +275,21 @@ def check_binding(ds_id: int, binding: dict, input_columns: list[dict] | None, p
     unmapped_auto = [a for a in auto if a not in mapped_cols]
     if unmapped_auto and desc["referencedBy"]:
         reasons.append(f"自增列「{unmapped_auto[0]}」未映射且被引用（整表替换会重新分配 ID）")
-    elif unmapped_auto:
+    elif unmapped_auto and binding.get("strategy") != "PARTITION":
         warnings.append({"code": "AUTO_ID_REASSIGNED", "message": f"自增列「{unmapped_auto[0]}」未映射：每次整表替换 ID 会重新分配，若有其他地方引用该 ID 请映射或改用增量写入（v2）"})
     strategy = binding.get("strategy", "SWAP")
-    if reasons:
-        errors.append({"code": "STRATEGY_NOT_AVAILABLE", "message": "该表不能使用整表替换：" + "；".join(reasons) + "。v1 暂不支持此类表（v2 增量写入）"})
+    if strategy == "PARTITION":
+        # 按分区替换：原地删除 + 插入，不换表，触发器 / 外键 / 自增都不受影响
+        pf = binding.get("partitionFields") or []
+        mapped_fields = {m.get("field") for m in binding.get("columnMapping") or [] if m.get("column") in cols}
+        if not pf:
+            errors.append({"code": "PARTITION_FIELDS_REQUIRED", "message": "按分区替换需要选择分区字段（如估值日期）"})
+        elif [f for f in pf if f not in mapped_fields]:
+            errors.append({"code": "PARTITION_FIELDS_REQUIRED", "message": f"分区字段「{'、'.join(f for f in pf if f not in mapped_fields)}」需要映射到目标表的列"})
     elif strategy != "SWAP":
-        errors.append({"code": "STRATEGY_NOT_AVAILABLE", "message": "v1 只支持整表替换（SWAP）"})
+        errors.append({"code": "STRATEGY_NOT_AVAILABLE", "message": f"不支持的写入方式 {strategy}"})
+    elif reasons:
+        errors.append({"code": "STRATEGY_NOT_AVAILABLE", "message": "该表不能使用整表替换：" + "；".join(reasons) + "。可以改用「按分区替换」"})
     with get_engine().connect() as c:
         own = c.execute(select(table_owner.c.pipeline_id, pipeline.c.code).join(pipeline, pipeline.c.id == table_owner.c.pipeline_id)
                         .where(table_owner.c.datasource_id == ds_id, table_owner.c.table_name == table)).first()
@@ -297,10 +305,12 @@ def check_binding(ds_id: int, binding: dict, input_columns: list[dict] | None, p
             if all(fields):
                 suggestion = fields
                 warnings.append({"code": "KEY_SUGGESTED", "message": f"建议使用 {', '.join(fields)} 作为主键（对应目标表键 {', '.join(key_cols)}）"})
-    if desc["rowCount"] and not own:
+    if desc["rowCount"] and strategy == "PARTITION":
+        warnings.append({"code": "TAKEOVER_BASELINE", "message": f"目标表已有 {desc['rowCount']} 行：每次写入只替换与本批数据分区相同的行，其他行保留"})
+    elif desc["rowCount"] and not own:
         warnings.append({"code": "TAKEOVER_BASELINE", "message": f"目标表已有 {desc['rowCount']} 行数据，首次发布前会保存为基线，可回滚到接管前"})
     return {"ok": not errors, "errors": errors, "warnings": warnings, "table": desc, "keySuggestion": suggestion,
-            "strategies": {"SWAP": not reasons, "APPLY_DIFF": False}}
+            "strategies": {"SWAP": not reasons, "PARTITION": True, "APPLY_DIFF": False}}
 
 
 # ======================= 按上游字段新建目标表 =======================

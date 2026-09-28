@@ -373,8 +373,16 @@ def force_publish(job_id: int, body: ReasonIn, op: OpContext = Depends(require_o
 def releases(pid: int):
     live = publishing.live_release(pid)
     out = []
-    for r in executor.rollback_targets(pid):
-        out.append({"id": r["id"], "kind": r["kind"], "status": r["status"], "jobId": r["job_id"], "rollbackTo": r["rollback_to"],
+    rels = executor.rollback_targets(pid)
+    undone = {(r.get("write_plan") or {}).get("undo") for r in rels if r["status"] == "PUBLISHED"}
+    for r in rels:
+        plan = r.get("write_plan") or {}
+        part = plan.get("strategy") == "PARTITION"
+        out.append({"strategy": "PARTITION" if part else "SWAP",
+                    "partitions": {t["table"]: t.get("partitions", []) for t in plan.get("tables", [])} if part else None,
+                    "undoOf": plan.get("undo"), "undone": r["id"] in undone,
+                    "undoable": part and r["status"] == "PUBLISHED" and r["id"] not in undone and not plan.get("undo"),
+                    "id": r["id"], "kind": r["kind"], "status": r["status"], "jobId": r["job_id"], "rollbackTo": r["rollback_to"],
                     "prevReleaseId": r["prev_release_id"], "operator": r["operator"], "reason": r["reason"],
                     "changeSummary": r["change_summary"], "tables": [t["table_name"] for t in publishing.release_tables(r["id"])],
                     "createdAt": _iso(r["created_at"]), "publishedAt": _iso(r["published_at"]),
@@ -389,6 +397,16 @@ def release_changes(rid: int, table: str | None = None, op: str | None = None, o
     with get_engine().connect() as c:
         uri = c.execute(select(release.c.change_uri).where(release.c.id == rid)).scalar()
     return ok(publishing.read_changes(uri, table, op, offset, min(limit, 500)))
+
+
+class UndoIn(BaseModel):
+    reason: str
+    freeze: bool = False
+
+
+@router.post("/pipelines/{pid}/releases/{rid}/undo")
+def undo_release(pid: int, rid: int, body: UndoIn, op: OpContext = Depends(require_op)):
+    return ok(executor.undo_partition_release(pid, rid, op.operator, op.ip, body.reason, body.freeze))
 
 
 class RollbackPreviewIn(BaseModel):

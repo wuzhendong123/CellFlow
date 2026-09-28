@@ -350,8 +350,40 @@ def forecast(p: dict, res) -> dict:
         return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
+def is_partition(td: TableData) -> bool:
+    return (td.binding or {}).get("strategy") == "PARTITION"
+
+
+def partition_columns(td: TableData) -> list[str]:
+    by_field = {m["field"]: m["column"] for m in (td.binding or {}).get("columnMapping") or []}
+    return [by_field[f] for f in (td.binding or {}).get("partitionFields") or [] if f in by_field]
+
+
+def partition_values(td: TableData) -> list[tuple]:
+    """本批数据涉及的分区（按出现顺序去重）。"""
+    cols = partition_columns(td)
+    seen: dict[tuple, None] = {}
+    for r in td.rows:
+        seen.setdefault(tuple(r.get(c) for c in cols), None)
+    return list(seen)
+
+
+def partition_live_rows(ds_id: int, td: TableData) -> list[dict]:
+    """按分区写入时的「线上内容」= 业务表里本批分区的当前数据（直接读库）。"""
+    try:
+        with datasources.engine_for(ds_id).connect() as c:
+            if not writer.table_exists(c, td.table):
+                return []
+            _, rows = writer.read_partitions(c, td.table, partition_columns(td), partition_values(td))
+    except CFError:
+        raise
+    return project([{"r": r} for r in rows], td.columns, td.key_columns)
+
+
 def current_rows(ds_id: int, live: dict | None, td: TableData) -> tuple[list[dict], dict | None]:
-    """线上内容（投影到本次写入的列）：有发布记录取快照，否则取业务表当前内容。"""
+    """线上内容（投影到本次写入的列）：有发布记录取快照，否则取业务表当前内容；按分区写入时只取本批分区。"""
+    if is_partition(td):
+        return partition_live_rows(ds_id, td), None
     if live:
         raw, meta = live_rows_for(live, td.dataset, td.table)
         return comparable(raw, meta, td.columns, td.key_columns), meta

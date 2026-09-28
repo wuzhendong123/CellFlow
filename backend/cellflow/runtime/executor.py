@@ -121,18 +121,20 @@ def ensure_baseline(p: dict, tds: list[pub.TableData]) -> dict:
 def _guard_and_write(p: dict, job: dict | None, tds: list[pub.TableData], snaps: dict[str, int], error_count: int, *,
                      kind: str, operator: str, reason: str | None = None, skip_overridable: bool = False,
                      rollback_to: int | None = None) -> tuple[str, dict, list[dict]]:
-    live = ensure_baseline(p, tds)
+    partition = any(pub.is_partition(td) for td in tds)
+    # 按分区写入不需要整表基线：撤销依据是每次写入前保存的分区旧数据
+    live = pub.live_release(p["id"]) if partition else ensure_baseline(p, tds)
     per_table, guards_all, cell_issues = {}, [], []
     for td in tds:
         live_rows, meta = pub.current_rows(p["datasource_id"], live, td)
         new = pub.project([{"r": r, "c": c} for r, c in zip(td.rows, td.cells, strict=True)], td.columns, td.key_columns)
         changes = pub.diff_rows(live_rows, new, td.columns, td.key_columns)
-        g, cells = pub.evaluate_guards(td, live_rows, meta, changes, p["datasource_id"], live, error_count)
+        g, cells = pub.evaluate_guards(td, live_rows, meta, changes, p["datasource_id"], live, error_count, check_drift=not partition)
         per_table[td.dataset] = (td.table, changes)
         guards_all += g
         cell_issues += cells
     result: dict[str, Any] = {
-        "baseReleaseId": live["id"], "snapshots": snaps, "guards": guards_all,
+        "baseReleaseId": live["id"] if live else None, "snapshots": snaps, "guards": guards_all,
         "tables": [{"dataset": ds, "table": t, "rows": len(next(x for x in tds if x.dataset == ds).rows),
                     "changes": pub.summary(ch)} for ds, (t, ch) in per_table.items()],
     }
@@ -148,8 +150,79 @@ def _guard_and_write(p: dict, job: dict | None, tds: list[pub.TableData], snaps:
     return "PUBLISHED", result, []
 
 
-def write_release(p: dict, tds: list[pub.TableData], snaps: dict[str, int], per_table: dict, live: dict, *, kind: str,
+def _content_hash(rows: list[dict], columns: list[str]) -> str:
+    import hashlib
+
+    return hashlib.sha256("\n".join(sorted(writer.row_hash(r, columns) for r in rows)).encode()).hexdigest()
+
+
+def _partition_before_key(rid: int) -> str:
+    return f"partition_before/{rid}.json.gz"
+
+
+def _save_json(key: str, obj) -> None:
+    import gzip
+    import json
+
+    from cellflow.storage import get_storage
+
+    get_storage().put(key, gzip.compress(json.dumps(to_jsonable(obj), ensure_ascii=False, default=str).encode()))
+
+
+def _load_json(key: str):
+    import gzip
+    import json
+
+    from cellflow.storage import get_storage
+
+    st = get_storage()
+    if not st.exists(key):
+        raise CFError("SNAPSHOT_EXPIRED", "该次写入前的数据已超过保留期，无法撤销", 410)
+    return json.loads(gzip.decompress(st.get(key)))
+
+
+def _write_partitions(p: dict, writes: list[writer.PartitionWrite], *, pipeline_id: int, kind: str, operator: str,
+                      reason: str | None, job_id: int | None, live: dict | None, snaps: dict[str, int] | None,
+                      datasets: dict[str, str], per_table: dict, rollback_to: int | None = None, undo: int | None = None) -> int:
+    """按分区替换：建 WRITING 发布 → 一个事务内保存旧数据、删分区、写新数据 → 发布记录 PUBLISHED、切线上指针。"""
+    eng = datasources.engine_for(p["datasource_id"])
+    plan = {"strategy": "PARTITION", "tables": [{
+        "table": w.table, "columns": w.columns, "partitionColumns": w.partition_columns, "partitions": to_jsonable([list(x) for x in w.partitions]),
+        "rows": len(w.rows), "expectHash": _content_hash(w.rows, w.columns)} for w in writes]}
+    if undo:
+        plan["undo"] = undo
+    with get_engine().begin() as c:
+        rid = pub.create_release(c, pipeline_id=pipeline_id, job_id=job_id, kind=kind, status="WRITING", rollback_to=rollback_to,
+                                 prev_release_id=live["id"] if live else None, write_plan=plan,
+                                 change_summary={ds: pub.summary(ch) for ds, (_, ch) in per_table.items()},
+                                 operator=operator[:64], reason=reason)
+        for ds, table in datasets.items():
+            if snaps and ds in snaps:
+                c.execute(release_snapshot.insert().values(release_id=rid, dataset=ds, snapshot_id=snaps[ds], table_name=table))
+    key = _partition_before_key(rid)
+    try:
+        checksums = writer.partition_replace(eng, writes, lambda before: _save_json(key, before))
+    except writer.WriteError as e:
+        with get_engine().begin() as c:
+            c.execute(release.update().where(release.c.id == rid).values(status="FAILED", reason=e.message[:512]))
+        raise CFError("WRITE_FAILED", e.message, 500) from e
+    except Exception as e:  # noqa: BLE001 — 数据库报错（如类型、约束）：事务已回滚，业务表不变
+        with get_engine().begin() as c:
+            c.execute(release.update().where(release.c.id == rid).values(status="FAILED", reason=str(e)[:512]))
+        raise CFError("WRITE_FAILED", f"写入失败，业务表未改动：{str(getattr(e, 'orig', e))[:200]}", 500) from e
+    change_uri = pub.save_changes(rid, per_table)
+    with get_engine().begin() as c:
+        pub.finish_release(c, rid, status="PUBLISHED", table_checksums=checksums, change_uri=change_uri)
+        pub.set_live(c, pipeline_id, rid, live["id"] if live else None)
+    return rid
+
+
+def write_release(p: dict, tds: list[pub.TableData], snaps: dict[str, int], per_table: dict, live: dict | None, *, kind: str,
                   operator: str, reason: str | None, job_id: int | None, rollback_to: int | None = None) -> int:
+    if any(pub.is_partition(td) for td in tds):
+        writes = [writer.PartitionWrite(td.table, td.columns, td.rows, pub.partition_columns(td), pub.partition_values(td)) for td in tds]
+        return _write_partitions(p, writes, pipeline_id=p["id"], kind=kind, operator=operator, reason=reason, job_id=job_id, live=live,
+                                 snaps=snaps, datasets={td.dataset: td.table for td in tds}, per_table=per_table, rollback_to=rollback_to)
     s = settings.get_all()
     eng = datasources.engine_for(p["datasource_id"])
     token = job_id if job_id else f"r{live['id']}"
@@ -286,6 +359,59 @@ def _rollback_changes(live: dict, target_id: int) -> tuple[list[pub.TableData], 
     return tds, per_table
 
 
+def undo_partition_release(pipeline_id: int, release_id: int, operator: str, ip: str, reason: str, freeze: bool = False) -> dict:
+    """撤销一次按分区写入：把这次写入涉及的分区恢复成写入前的数据（其他分区不动）。
+    之后若还有写入改过同一分区，需要先撤销后面的，避免把别人的数据冲掉。"""
+    if not reason:
+        raise CFError("INVALID_REQUEST", "撤销必须填写理由", 400)
+    p = pipelines.get_pipeline(pipeline_id)
+    target = _release(release_id, pipeline_id)
+    plan = target.get("write_plan") or {}
+    if plan.get("strategy") != "PARTITION":
+        raise CFError("INVALID_REQUEST", "只有按分区写入的发布可以撤销", 400)
+    with get_engine().connect() as lc:
+        if not pub.pipeline_lock(lc, pipeline_id, timeout=60):
+            raise CFError("PIPELINE_BUSY", "方案正在执行其他任务，请稍后再试", 409)
+        try:
+            with get_engine().connect() as c:
+                later = [dict(r) for r in c.execute(select(release).where(and_(
+                    release.c.pipeline_id == pipeline_id, release.c.id > release_id, release.c.status == "PUBLISHED"))).mappings()]
+            mine = {(t["table"], tuple(map(str, x))) for t in plan["tables"] for x in t["partitions"]}
+            for r in later:
+                lp = r.get("write_plan") or {}
+                if lp.get("undo") == release_id:
+                    raise CFError("ALREADY_UNDONE", f"这次写入已经被发布 #{r['id']} 撤销过了", 409)
+                theirs = {(t["table"], tuple(map(str, x))) for t in lp.get("tables", []) for x in t.get("partitions", [])}
+                if mine & theirs:
+                    raise CFError("LATER_WRITE_EXISTS", f"之后的发布 #{r['id']} 也写过这些分区，请先撤销 #{r['id']}", 409)
+            before = _load_json(_partition_before_key(release_id))
+            writes, per_table = [], {}
+            for t in plan["tables"]:
+                rows = before.get(t["table"], [])
+                cols = list(rows[0].keys()) if rows else t["columns"]
+                writes.append(writer.PartitionWrite(t["table"], cols, rows, t["partitionColumns"], [tuple(x) for x in t["partitions"]]))
+            eng = datasources.engine_for(p["datasource_id"])
+            with eng.connect() as c:
+                for w in writes:
+                    _, cur = writer.read_partitions(c, w.table, w.partition_columns, w.partitions)
+                    cols = sorted(set(w.columns) & set(cur[0].keys())) if cur else w.columns
+                    old = pub.project([{"r": r} for r in cur], cols, None)
+                    new = pub.project([{"r": r} for r in w.rows], cols, None)
+                    per_table[w.table] = (w.table, pub.diff_rows(old, new, cols, None))
+            if freeze:
+                with get_engine().begin() as c:
+                    c.execute(pipeline.update().where(pipeline.c.id == pipeline_id).values(frozen=1))
+            rid = _write_partitions(p, writes, pipeline_id=pipeline_id, kind="ROLLBACK", operator=operator, reason=reason, job_id=None,
+                                    live=pub.live_release(pipeline_id), snaps=None, datasets={}, per_table=per_table,
+                                    rollback_to=release_id, undo=release_id)
+            with get_engine().begin() as c:
+                audit.record(c, operator, ip, "ROLLBACK", f"pipeline:{p['code']}",
+                             {"undo": release_id, "releaseId": rid, "mode": "PARTITION_UNDO", "freeze": freeze}, reason)
+        finally:
+            pub.pipeline_unlock(lc, pipeline_id)
+    return {"releaseId": rid, "mode": "PARTITION_UNDO", "frozen": freeze}
+
+
 def fill_release_changes(release_id: int) -> None:
     """补算快路径回滚的变更明细：上一个线上发布 → 回滚目标。"""
     r = pub.release_with_snapshots(release_id)
@@ -309,11 +435,17 @@ def rollback_preview(pipeline_id: int, target_id: int) -> dict:
     target = _release(target_id, pipeline_id)
     if target["id"] == live["id"]:
         raise CFError("INVALID_REQUEST", "目标版本就是当前线上版本", 400)
+    _no_partition(live, target)
     pre = _rollback_checks(p, live, target_id, _target_tds(target_id, with_rows=False))
     _, per_table = _rollback_changes(live, target_id)
     for t in pre["tables"]:
         t["changes"] = pub.summary(per_table[t["dataset"]][1])
     return pre
+
+
+def _no_partition(*rels: dict) -> None:
+    if any((r.get("write_plan") or {}).get("strategy") == "PARTITION" for r in rels):
+        raise CFError("USE_PARTITION_UNDO", "按分区写入的方案请在发布历史里对某次写入点「撤销此次写入」", 409)
 
 
 def _release(rid: int, pipeline_id: int) -> dict:
@@ -339,6 +471,7 @@ def rollback(pipeline_id: int, target_id: int, expected_live_id: int, operator: 
             target = _release(target_id, pipeline_id)
             if target["id"] == live["id"]:
                 raise CFError("INVALID_REQUEST", "目标版本就是当前线上版本", 400)
+            _no_partition(live, target)
             pre = _rollback_checks(p, live, target_id, _target_tds(target_id, with_rows=False))
             if not pre["compatible"]:
                 raise CFError("TARGET_SCHEMA_MISMATCH", "目标版本与当前表结构不兼容", 409, pre)
@@ -390,6 +523,19 @@ def rollback(pipeline_id: int, target_id: int, expected_live_id: int, operator: 
 
 
 # ======================= 崩溃恢复（§10.4） =======================
+def _recover_partition(eng, plan: dict) -> str:
+    """分区写入是单个事务：看分区里现在是不是本次要写的内容，是则已提交。"""
+    try:
+        with eng.connect() as c:
+            for t in plan["tables"]:
+                _, rows = writer.read_partitions(c, t["table"], t["partitionColumns"], [tuple(x) for x in t["partitions"]])
+                if len(rows) != t["rows"] or _content_hash(rows, t["columns"]) != t["expectHash"]:
+                    return "FAILED"
+        return "PUBLISHED"
+    except Exception:  # noqa: BLE001
+        return "FAILED"
+
+
 def recover_writing() -> list[dict]:
     """把 WRITING 状态的发布按业务库实际情况修正为 PUBLISHED / FAILED。"""
     out = []
@@ -399,11 +545,14 @@ def recover_writing() -> list[dict]:
         p = pipelines.get_pipeline(r["pipeline_id"])
         eng = datasources.engine_for(p["datasource_id"])
         plan = r["write_plan"] or {}
-        state = writer.recover(eng, plan) if plan.get("tables") else "FAILED"
+        if plan.get("strategy") == "PARTITION":
+            state = _recover_partition(eng, plan)
+        else:
+            state = writer.recover(eng, plan) if plan.get("tables") else "FAILED"
         with get_engine().begin() as c:
             if state == "PUBLISHED":
                 with eng.connect() as bc:
-                    sums = {t["table"]: writer.checksum(bc, t["table"]) for t in plan["tables"]}
+                    sums = {t["table"]: writer.checksum(bc, t["table"]) for t in plan.get("tables", [])}
                 pub.finish_release(c, r["id"], status="PUBLISHED", table_checksums=sums)
                 try:
                     pub.set_live(c, r["pipeline_id"], r["id"], r["prev_release_id"])

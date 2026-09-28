@@ -235,3 +235,68 @@ def norm_value(v: Any) -> Any:
 def row_hash(row: dict, columns: list[str]) -> str:
     payload = json.dumps([[c, norm_value(row.get(c))] for c in sorted(columns)], ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# ======================= 按分区替换（PARTITION） =======================
+@dataclass
+class PartitionWrite:
+    table: str
+    columns: list[str]
+    rows: list[dict]
+    partition_columns: list[str]
+    partitions: list[tuple]  # 本批数据涉及的分区取值
+
+
+def _partition_where(pw_cols: list[str], partitions: list[tuple], prefix: str = "p") -> tuple[str, dict]:
+    """(a, b) IN ((:p0_0, :p0_1), ...)；取值全部参数化。"""
+    params: dict[str, Any] = {}
+    groups = []
+    for i, vals in enumerate(partitions):
+        names = []
+        for j, v in enumerate(vals):
+            k = f"{prefix}{i}_{j}"
+            params[k] = db_value(v)
+            names.append(f":{k}")
+        groups.append("(" + ", ".join(names) + ")")
+    cols = "(" + ", ".join(q(c) for c in pw_cols) + ")"
+    return f"{cols} IN ({', '.join(groups)})", params
+
+
+def read_partitions(conn, table: str, partition_columns: list[str], partitions: list[tuple], lock: bool = False) -> tuple[list[str], list[dict]]:
+    if not partitions:
+        cols = list(conn.execute(text(f"SELECT * FROM {q(table)} LIMIT 0")).keys())
+        return cols, []
+    out: list[dict] = []
+    cols: list[str] = []
+    for k in range(0, len(partitions), 500):
+        where, params = _partition_where(partition_columns, partitions[k:k + 500])
+        res = conn.execute(text(f"SELECT * FROM {q(table)} WHERE {where}" + (" FOR UPDATE" if lock else "")), params)
+        cols = list(res.keys())
+        out += [dict(zip(cols, r, strict=True)) for r in res.all()]
+    return cols, out
+
+
+def partition_replace(engine: Engine, writes: list[PartitionWrite], save_before) -> dict[str, str]:
+    """一个事务内：锁住并读出各表本批分区的旧数据（交给 save_before 保存，用于撤销），删除这些分区，写入新数据。
+    任一步失败整体回滚，业务表不变。返回写后校验和。"""
+    with engine.connect() as c:
+        with c.begin():
+            before = {}
+            for w in writes:
+                _, before[w.table] = read_partitions(c, w.table, w.partition_columns, w.partitions, lock=True)
+            save_before(before)
+            for w in writes:
+                for k in range(0, len(w.partitions), 500):
+                    where, params = _partition_where(w.partition_columns, w.partitions[k:k + 500])
+                    c.execute(text(f"DELETE FROM {q(w.table)} WHERE {where}"), params)
+                if w.rows:
+                    cols = ", ".join(q(x) for x in w.columns)
+                    ph = ", ".join(f":p{i}" for i in range(len(w.columns)))
+                    stmt = text(f"INSERT INTO {q(w.table)} ({cols}) VALUES ({ph})")
+                    for k in range(0, len(w.rows), BATCH):
+                        c.execute(stmt, [{f"p{i}": db_value(r.get(col)) for i, col in enumerate(w.columns)} for r in w.rows[k:k + BATCH]])
+                _, now = read_partitions(c, w.table, w.partition_columns, w.partitions)
+                if len(now) != len(w.rows):
+                    raise WriteError("WRITE_VERIFY_FAILED", f"{w.table} 写入后分区内行数 {len(now)} 与预期 {len(w.rows)} 不一致")
+    with engine.connect() as c:
+        return {w.table: checksum(c, w.table) for w in writes}

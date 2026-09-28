@@ -586,7 +586,7 @@ function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: a
             {check.errors.map((e: any, i: number) => <Alert key={i} type="error" showIcon message={e.message} className="binding-error" />)}
             {check.warnings.map((e: any, i: number) => <Alert key={"w" + i} type={e.code === "TAKEOVER_BASELINE" ? "info" : "warning"} showIcon message={e.message}
               action={e.code === "KEY_SUGGESTED" && check.keySuggestion ? <Button size="small" onClick={() => setB({ keyFields: check.keySuggestion })}>采用</Button> : undefined} />)}
-            {check.ok && <Alert type="success" showIcon message="可以整表替换" />}
+            {check.ok && <Alert type="success" showIcon message={b.strategy === "PARTITION" ? "可以按分区替换" : "可以整表替换"} />}
           </>
         )}
         {desc && (
@@ -600,7 +600,18 @@ function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: a
         )}
         {unmappedFields.length > 0 && <span className="cf-muted">未被映射的字段：{unmappedFields.join("、")}</span>}
         <Space>主键（可选）<Select size="small" mode="multiple" style={{ width: 260 }} value={b.keyFields || []} options={options(main)} onChange={(v) => setB({ keyFields: v.length ? v : null })} /></Space>
-        <Space>写入方式 <Tag>整表替换（v1）</Tag></Space>
+        <Space wrap>写入方式
+          <Radio.Group id="binding-strategy" size="small" value={b.strategy || "SWAP"} onChange={(e) => setB({ strategy: e.target.value })}
+            options={[{ value: "SWAP", label: "整表替换" }, { value: "PARTITION", label: "按分区替换" }]} />
+        </Space>
+        {b.strategy === "PARTITION" && (
+          <Space direction="vertical" size={2}>
+            <Space>分区字段 <Select id="binding-partition" size="small" mode="multiple" style={{ width: 260 }} placeholder="如：日期"
+              value={b.partitionFields || []} options={options(main).filter((o: any) => mapping.some((m) => m.field === o.value))}
+              onChange={(v) => setB({ partitionFields: v })} /></Space>
+            <span className="cf-muted">每次写入时，先删除表里「本批数据出现的分区值」对应的行，再写入本批数据；其他分区保持不变。适合每天一个文件写同一张表。</span>
+          </Space>
+        )}
         <Space wrap>安全闸覆盖（空为系统设置）
           删除比例 <InputNumber size="small" min={0} max={1} step={0.05} value={b.guards?.maxDeleteRatio} onChange={(v) => setB({ guards: { ...(b.guards || {}), maxDeleteRatio: v ?? undefined } })} />
           行数波动 <InputNumber size="small" min={0} max={1} step={0.05} value={b.guards?.maxRowChangeRatio} onChange={(v) => setB({ guards: { ...(b.guards || {}), maxRowChangeRatio: v ?? undefined } })} />

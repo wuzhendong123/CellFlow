@@ -235,6 +235,9 @@ def publish(pid: int, draft_version: int, note: str | None, who: str, ip: str, r
     sinks = [n for n in dsl.get("nodes", []) if n.get("type") == "SINK"]
     if not sinks:
         errors.append({"code": "DSL_INVALID", "message": "方案至少需要一个输出节点"})
+    modes = {((n.get("config") or {}).get("binding") or {}).get("strategy", "SWAP") for n in sinks}
+    if len(modes) > 1:
+        errors.append({"code": "DSL_INVALID", "message": "同一个方案的输出表写入方式需要一致（都用整表替换，或都用按分区替换），以保证多张表一起成功或一起失败"})
     for n in sinks:
         b = (n.get("config") or {}).get("binding") or {}
         edge = next((e for e in dsl.get("edges", []) if e["target"]["nodeId"] == n["id"]), None)
