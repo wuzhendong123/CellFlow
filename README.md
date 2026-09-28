@@ -15,7 +15,7 @@ git clone https://github.com/wuzhendong123/CellFlow.git && cd CellFlow
 ```
 
 - 高危操作（发布、放行、回滚、改设置等）的口令默认是 `local-op-token`，可用环境变量 `CF_OP_TOKEN` 修改。
-- 控制台里新建数据源时，连接地址引用名填 `BIZ_MYSQL`、库名填 `cellflow_biz`（本地业务库，`./cellflow.sh mysql` 可进入查看）；新建调用方时签名密钥引用名填 `DEMO_APP_SECRET`。
+- 数据源可以配置多个：控制台「数据源 → 新建」选「直接填写」，填主机、端口、账号、口令、库名即可（口令加密保存，不回显）。连接本机 Docker 里的 MySQL 主机填 `mysql`、端口 `3306`；连接 Mac 本机上的 MySQL 主机填 `host.docker.internal`。也可以选「环境变量引用」，例如引用名 `BIZ_MYSQL` + 库名 `cellflow_biz`（本地业务库，`./cellflow.sh mysql` 可进入查看）。新建调用方时签名密钥引用名填 `DEMO_APP_SECRET`。
 - 其他命令：`status`、`logs [api|worker]`、`test`（容器内跑后端测试）、`restart`（`git pull` 后重建）、`down`、`reset`（清空数据）。`./cellflow.sh` 不带参数查看帮助。
 - 端口冲突时：`CF_PORT=8080 CF_MYSQL_PORT=23306 ./cellflow.sh up`。
 

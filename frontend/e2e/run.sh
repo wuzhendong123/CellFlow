@@ -10,7 +10,7 @@ export CF_E2E_DATA=${CF_E2E_DATA:-$PWD/e2e/.data}
 export CF_META_DB_URL="$CF_E2E_MYSQL_URL/$CF_E2E_META_DB?charset=utf8mb4"
 export CF_REDIS_URL=${CF_E2E_REDIS_URL:-redis://127.0.0.1:6379/14}
 export CF_STORAGE_BACKEND=local CF_STORAGE_LOCAL_DIR="$CF_E2E_DATA/storage"
-export CF_OP_TOKEN=e2e-op-token
+export CF_OP_TOKEN=e2e-op-token CF_SECRET_KEY=e2e-secret-key
 export CF_REF_E2E_BIZ="$CF_E2E_MYSQL_URL" CF_REF_E2E_APP_SECRET=e2e-app-secret
 export CF_E2E_BASE=${CF_E2E_BASE:-http://127.0.0.1:8765}
 unset CF_JOB_INLINE

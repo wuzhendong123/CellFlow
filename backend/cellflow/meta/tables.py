@@ -15,6 +15,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -88,9 +89,14 @@ datasource = Table(
     "cf_datasource", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("name", String(64), nullable=False),
-    Column("host_ref", String(128), nullable=False),
+    Column("conn_mode", String(8), nullable=False, server_default="REF"),  # REF：引用环境变量；DIRECT：控制台直接填写
+    Column("host_ref", String(128)),
     Column("db_name", String(64), nullable=False),
     Column("credential_ref", String(128)),
+    Column("host", String(255)),
+    Column("port", Integer),
+    Column("username", String(128)),
+    Column("password_enc", Text),  # CF_SECRET_KEY 加密后的口令，接口不返回
     UniqueConstraint("name", name="uk_name"),
     **_opts,
 )

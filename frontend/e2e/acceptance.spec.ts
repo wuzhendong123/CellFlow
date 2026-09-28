@@ -90,6 +90,7 @@ test("P9 新建数据源（口令错误提示 → 正确口令）并测试连接
   await nav(page, "数据源");
   await page.locator("#new-datasource").click();
   const m = page.locator(".ant-modal", { hasText: "新建数据源" });
+  await m.getByText("环境变量引用（生产推荐）").click();
   await m.getByLabel("名称").fill("业务库");
   await m.getByLabel("库名").fill(BIZ_DB);
   await m.getByLabel("连接地址引用名").fill("E2E_BIZ");
@@ -106,6 +107,26 @@ test("P9 新建数据源（口令错误提示 → 正确口令）并测试连接
   for (const k of ["connect", "CREATE", "DROP", "ALTER"]) {
     await expect(page.locator(".ant-table-row .ant-tag", { hasText: new RegExp(`^${k}$`) })).toHaveClass(/green/);
   }
+});
+
+test("P9 直接填写连接信息新建第二个数据源（口令加密、不回显）", async ({ request }) => {
+  const u = new URL((process.env.CF_E2E_MYSQL_URL || "mysql://cellflow:cellflow_dev@127.0.0.1:3306").replace(/^mysql\+pymysql/, "mysql"));
+  await page.locator("#new-datasource").click();
+  const m = page.locator(".ant-modal", { hasText: "新建数据源" });
+  await m.getByLabel("名称").fill("直连库");
+  await m.getByLabel("库名").fill(BIZ_DB);
+  await m.getByLabel("主机").fill(u.hostname);
+  await m.getByLabel("端口").fill(u.port || "3306");
+  await m.getByLabel("账号").fill(decodeURIComponent(u.username));
+  await m.getByLabel("口令").fill(decodeURIComponent(u.password));
+  await m.getByRole("button", { name: /保存/ }).click();
+  await opConfirm(page);
+  const row = page.locator(".ant-table-row", { hasText: "直连库" });
+  await expect(row).toContainText("直接填写");
+  await row.getByText("测试连接").click();
+  await expect(row.locator(".ant-tag", { hasText: /^CREATE$/ })).toHaveClass(/green/);
+  const list = await (await request.get("/api/datasources")).text();
+  expect(list).not.toContain(decodeURIComponent(u.password));
 });
 
 test("P2 新建方案并上传样例文件，进入工作台", async () => {

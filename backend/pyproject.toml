@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "CellFlow：不规则 Excel 的可视化解析配置与自动写表平台（后端）"
 requires-python = ">=3.11"
 dependencies = [
+  "cryptography>=42",
   "fastapi>=0.110",
   "uvicorn>=0.29",
   "pydantic>=2.6",

@@ -8,6 +8,8 @@ x-app-env: &app-env
   CF_STORAGE_BACKEND: local
   CF_STORAGE_LOCAL_DIR: /data/storage
   CF_OP_TOKEN: ${CF_OP_TOKEN:-local-op-token}
+  # 控制台直接填写的数据库口令用它加密保存；更换后已保存的口令需要重新填写
+  CF_SECRET_KEY: ${CF_SECRET_KEY:-local-secret-key}
   # 数据源 / 调用方「引用名」对应的真实值（CF_REF_<引用名>），控制台里只填引用名
   CF_REF_BIZ_MYSQL: mysql+pymysql://cellflow:change_me@mysql:3306
   CF_REF_DEMO_APP_SECRET: ${CF_DEMO_APP_SECRET:-local-demo-secret}

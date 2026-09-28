@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from sqlalchemy import Engine, create_engine, select, text
 
+from cellflow import secret_box
 from cellflow.config import ConfigError, resolve_ref
 from cellflow.engine.types import parse_type
 from cellflow.errors import CFError, not_found
@@ -37,21 +39,56 @@ def get(ds_id: int) -> dict:
 
 
 def save(data: dict, ds_id: int | None = None) -> dict:
-    vals = {k: data.get(k) for k in ("name", "host_ref", "db_name", "credential_ref")}
-    if not vals["name"] or not vals["host_ref"] or not vals["db_name"]:
-        raise CFError("INVALID_REQUEST", "名称、连接引用名、库名必填", 400)
-    for k in ("host_ref", "credential_ref"):
-        v = vals.get(k)
-        if v and ("://" in v or "@" in v or ":" in v):
-            raise CFError("INVALID_REQUEST", "只能填写引用名，不能填写真实连接地址或口令", 400)
+    """两种连接方式：REF（只登记环境变量引用名，生产推荐）；DIRECT（控制台直接填写，口令用 CF_SECRET_KEY 加密存储）。"""
+    mode = (data.get("conn_mode") or "REF").upper()
+    if mode not in ("REF", "DIRECT"):
+        raise CFError("INVALID_REQUEST", "连接方式只能是 REF 或 DIRECT", 400)
+    vals: dict = {"name": (data.get("name") or "").strip(), "db_name": (data.get("db_name") or "").strip(), "conn_mode": mode}
+    if not vals["name"] or not vals["db_name"]:
+        raise CFError("INVALID_REQUEST", "名称、库名必填", 400)
+    old = get(ds_id) if ds_id is not None else None
+    if mode == "REF":
+        vals.update(host_ref=data.get("host_ref"), credential_ref=data.get("credential_ref") or None,
+                    host=None, port=None, username=None, password_enc=None)
+        if not vals["host_ref"]:
+            raise CFError("INVALID_REQUEST", "连接引用名必填", 400)
+        for k in ("host_ref", "credential_ref"):
+            v = vals.get(k)
+            if v and ("://" in v or "@" in v or ":" in v):
+                raise CFError("INVALID_REQUEST", "只能填写引用名，不能填写真实连接地址或口令", 400)
+    else:
+        host = (data.get("host") or "").strip()
+        user = (data.get("username") or "").strip()
+        port = int(data.get("port") or 3306)
+        if not host or not user:
+            raise CFError("INVALID_REQUEST", "主机、账号必填", 400)
+        if any(ch in host for ch in "/@ ?#") or not (0 < port < 65536):
+            raise CFError("INVALID_REQUEST", "主机只填地址（如 10.0.0.5 或 host.docker.internal），端口 1~65535", 400)
+        pwd = data.get("password")
+        if pwd:
+            enc = secret_box.encrypt(pwd)
+        elif old and old.get("conn_mode") == "DIRECT" and old.get("password_enc"):
+            enc = old["password_enc"]  # 编辑时不填口令表示不修改
+        else:
+            raise CFError("INVALID_REQUEST", "口令必填", 400)
+        vals.update(host_ref=None, credential_ref=None, host=host, port=port, username=user, password_enc=enc)
     with get_engine().begin() as c:
         if ds_id is None:
+            if c.execute(select(datasource.c.id).where(datasource.c.name == vals["name"])).first():
+                raise CFError("INVALID_REQUEST", f"数据源名称「{vals['name']}」已存在", 409)
             ds_id = c.execute(datasource.insert().values(**vals)).inserted_primary_key[0]
         else:
-            get(ds_id)
             c.execute(datasource.update().where(datasource.c.id == ds_id).values(**vals))
     engine_for.cache_clear()
     return get(ds_id)
+
+
+def public_json(d: dict) -> dict:
+    """对外展示（不含口令）。"""
+    return {"id": d["id"], "name": d["name"], "mode": d.get("conn_mode") or "REF", "dbName": d["db_name"],
+            "hostRef": d.get("host_ref"), "credentialRef": d.get("credential_ref"),
+            "host": d.get("host"), "port": d.get("port"), "username": d.get("username"),
+            "hasPassword": bool(d.get("password_enc")), "pipelineCount": d.get("pipelineCount")}
 
 
 def delete(ds_id: int) -> None:
@@ -64,6 +101,10 @@ def delete(ds_id: int) -> None:
 
 
 def _url(ds: dict) -> str:
+    if (ds.get("conn_mode") or "REF") == "DIRECT":
+        user = quote_plus(ds["username"] or "")
+        pwd = quote_plus(secret_box.decrypt(ds["password_enc"])) if ds.get("password_enc") else ""
+        return f"mysql+pymysql://{user}:{pwd}@{ds['host']}:{ds.get('port') or 3306}/{ds['db_name']}?charset=utf8mb4"
     base = resolve_ref(ds["host_ref"]).rstrip("/")
     if ds.get("credential_ref"):
         cred = resolve_ref(ds["credential_ref"])

@@ -21,6 +21,7 @@ def pytest_configure(config):
     os.environ["CF_REDIS_URL"] = REDIS_URL
     os.environ["CF_STORAGE_BACKEND"] = "local"
     os.environ.setdefault("CF_OP_TOKEN", "test-op-token")
+    os.environ.setdefault("CF_SECRET_KEY", "test-secret-key")
     os.environ["CF_REF_TEST_BIZ"] = MYSQL_ROOT
     os.environ["CF_REF_TEST_APP_SECRET"] = "test-app-secret"
     os.environ["CF_JOB_INLINE"] = "1"

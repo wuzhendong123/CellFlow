@@ -393,14 +393,22 @@ def unfreeze(pid: int, body: ReasonIn, op: OpContext = Depends(require_op)):
 # ---------------- 管理：数据源 / 调用方 / 设置 / 审计 ----------------
 class DatasourceIn(BaseModel):
     name: str
-    hostRef: str
     dbName: str
+    mode: str = "REF"  # REF：引用环境变量；DIRECT：直接填写（口令加密存储）
+    hostRef: str | None = None
     credentialRef: str | None = None
+    host: str | None = None
+    port: int | None = None
+    username: str | None = None
+    password: str | None = None  # 只写不读；编辑时留空表示不修改
+
+    def to_service(self) -> dict:
+        return {"name": self.name, "db_name": self.dbName, "conn_mode": self.mode, "host_ref": self.hostRef,
+                "credential_ref": self.credentialRef, "host": self.host, "port": self.port, "username": self.username,
+                "password": self.password}
 
 
-def _ds_json(d: dict) -> dict:
-    return {"id": d["id"], "name": d["name"], "hostRef": d["host_ref"], "dbName": d["db_name"],
-            "credentialRef": d["credential_ref"], "pipelineCount": d.get("pipelineCount")}
+_ds_json = datasources.public_json
 
 
 @router.get("/datasources")
@@ -410,7 +418,7 @@ def list_datasources():
 
 @router.post("/datasources")
 def create_datasource(body: DatasourceIn, op: OpContext = Depends(require_op)):
-    d = datasources.save({"name": body.name, "host_ref": body.hostRef, "db_name": body.dbName, "credential_ref": body.credentialRef})
+    d = datasources.save(body.to_service())
     with get_engine().begin() as c:
         audit.record(c, op.operator, op.ip, "EDIT_DATASOURCE", f"datasource:{d['name']}", {"created": _ds_json(d)})
     return ok(_ds_json(d))
@@ -419,9 +427,10 @@ def create_datasource(body: DatasourceIn, op: OpContext = Depends(require_op)):
 @router.put("/datasources/{ds_id}")
 def update_datasource(ds_id: int, body: DatasourceIn, op: OpContext = Depends(require_op)):
     before = _ds_json(datasources.get(ds_id))
-    d = datasources.save({"name": body.name, "host_ref": body.hostRef, "db_name": body.dbName, "credential_ref": body.credentialRef}, ds_id)
+    d = datasources.save(body.to_service(), ds_id)
     with get_engine().begin() as c:
-        audit.record(c, op.operator, op.ip, "EDIT_DATASOURCE", f"datasource:{d['name']}", {"before": before, "after": _ds_json(d)})
+        audit.record(c, op.operator, op.ip, "EDIT_DATASOURCE", f"datasource:{d['name']}",
+                     {"before": before, "after": _ds_json(d), "passwordChanged": bool(body.password)})
     return ok(_ds_json(d))
 
 

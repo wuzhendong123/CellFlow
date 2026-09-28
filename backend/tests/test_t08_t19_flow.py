@@ -500,3 +500,31 @@ def test_open_api_security_boundaries(client, biz):
                                                       "allowedPipelines": ["hero_config"]}, headers=OP))
     assert call(now, key=other["appKey"], p=f"/open/v1/jobs/{jid}").status_code == 404  # 看不到别的调用方的任务
     assert call(now, p=f"/open/v1/jobs/{jid}").status_code == 200
+
+
+def test_datasource_direct_mode(client, biz):
+    """控制台直接填写连接信息：口令加密存储、接口不返回、编辑时留空不修改、可连通并用于写表检查。"""
+    from urllib.parse import urlparse
+
+    from conftest import BIZ_DB, MYSQL_ROOT
+
+    from cellflow.meta.db import get_engine
+
+    u = urlparse(MYSQL_ROOT.replace("mysql+pymysql", "mysql"))
+    body = {"name": "直连库", "mode": "DIRECT", "host": u.hostname, "port": u.port or 3306, "username": u.username,
+            "password": u.password, "dbName": BIZ_DB}
+    d = okd(client.post("/api/datasources", json=body, headers=OP))
+    assert d["mode"] == "DIRECT" and d["hasPassword"] and "password" not in d and "password_enc" not in d
+    with get_engine().connect() as c:
+        stored = c.execute(text("SELECT password_enc FROM cf_datasource WHERE id=:i"), {"i": d["id"]}).scalar()
+    assert stored and u.password not in stored  # 只存密文
+    t = okd(client.post(f"/api/datasources/{d['id']}/test"))
+    assert t["checks"]["connect"] and t["checks"]["CREATE"], t
+    okd(client.put(f"/api/datasources/{d['id']}", json={**body, "password": None, "name": "直连库2"}, headers=OP))
+    assert okd(client.post(f"/api/datasources/{d['id']}/test"))["checks"]["connect"]  # 留空口令 = 不修改
+    tables = okd(client.get(f"/api/datasources/{d['id']}/tables"))
+    assert "cfg_hero_base_hp" in str(tables)
+    bad = client.post("/api/datasources", json={**body, "name": "缺口令", "password": None}, headers=OP)
+    assert bad.status_code == 400
+    lst = client.get("/api/datasources").text
+    assert u.password not in lst
