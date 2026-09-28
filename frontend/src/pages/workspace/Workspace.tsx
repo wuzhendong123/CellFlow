@@ -573,7 +573,7 @@ function Inner({ pipeline, reload }: Props) {
     <div className="cf-config" data-testid="config-panel" style={{ width: configWidth }}>
       {selNode?.type === "EXCEL_SOURCE" ? (
         <RegionPanel node={selNode} fileId={pipeline.sampleFileId} sheets={sheets} selection={selection} issues={issues}
-          onChange={(cfg) => updateNode(selNode.id, { config: cfg })} onFocus={(r) => { openSplit(selNode.id); setFocusRange({ range: r, nonce: Date.now() }); }}
+          onChange={(cfg) => updateNode(selNode.id, { config: cfg })} onFocus={(r, open) => { if (open) openSplit(selNode.id); setFocusRange({ range: r, nonce: Date.now() }); }}
           onPreview={async (region) => {
             try {
               const sh = selNode.config.sheet?.match === "EXACT" ? selNode.config.sheet.value : sheet;

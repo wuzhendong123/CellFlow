@@ -12,7 +12,7 @@ interface Props {
   selection: RangeJson | null;
   issues: any[];
   onChange: (cfg: any) => void;
-  onFocus: (r: RangeJson) => void;
+  onFocus: (r: RangeJson, open?: boolean) => void; // open：切到分屏显示 Excel（双击）；否则只在表格已显示时定位
   onPreview: (region: any) => void;
 }
 
@@ -154,7 +154,9 @@ export default function RegionPanel({ node, fileId, sheets, selection, issues, o
             const n = regionIssues(r.regionId).filter((x) => x.severity === "ERROR").length;
             return (
               <List.Item style={{ cursor: "pointer", background: r.regionId === active ? "#f0f5ff" : undefined, paddingLeft: 6 }}
-                onClick={() => { setActive(r.regionId); if (r.designRange) onFocus(r.designRange); }}
+                title="单击选中并编辑；双击在 Excel 中查看"
+                onClick={() => { setActive(r.regionId); if (r.designRange) onFocus(r.designRange, false); }}
+                onDoubleClick={() => { setActive(r.regionId); if (r.designRange) onFocus(r.designRange, true); }}
                 actions={[
                   <Popconfirm key="d" title="删除该区域？" onConfirm={() => setRegions(regions.filter((x) => x.regionId !== r.regionId))}><a>删除</a></Popconfirm>,
                 ]}>
