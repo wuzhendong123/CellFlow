@@ -86,7 +86,7 @@ def input_ports(node: dict) -> dict[str, dict]:
         return {}
     if t in ("FILTER", "DERIVE"):
         return {"in": {"kind": "DATA"}, "in_params": {"kind": "PARAM", "optional": True}}
-    if t == "SELECT_RENAME" or t == "SINK":
+    if t in ("SELECT_RENAME", "SINK", "PIVOT"):
         return {"in": {"kind": "DATA"}}
     if t == "UNION":
         return {"in": {"kind": "DATA", "multi": True}}
@@ -109,7 +109,7 @@ def output_ports(node: dict) -> dict[str, dict]:
         return {r["outputPortId"]: {} for r in cfg.get("regions", []) if r.get("shape") != "IGNORE"}
     if t == "DERIVE":
         return {"out": {}, "out_reject": {"side": True}}
-    if t in ("FILTER", "SELECT_RENAME", "UNION", "LOOKUP"):
+    if t in ("FILTER", "SELECT_RENAME", "UNION", "LOOKUP", "PIVOT"):
         return {"out": {}}
     if t == "JOIN":
         return {"out_main": {}, "out_unmatched": {"side": True}}
@@ -889,6 +889,122 @@ def run_sink(node, inputs, ctx: RunContext):
     return {}
 
 
+# ======================= PIVOT（分组转列） =======================
+PIVOT_AGGS = {"FIRST", "SUM", "COUNT", "MAX", "MIN", "AVG"}
+
+
+def _pivot_value_type(agg: str, t: str) -> str:
+    base = parse_type(t).name
+    if agg == "COUNT":
+        return "long"
+    if agg == "AVG":
+        return "float"
+    if agg == "SUM" and base == "int":
+        return "long"
+    return t
+
+
+def infer_pivot(node, inputs):
+    """按分组字段分组，把「转列字段」的每个取值变成一列，单元格取「值字段」（重复时按聚合方式合并）。"""
+    res = InferResult()
+    src = inputs.get("in")
+    if src is None:
+        return res
+    cfg = node.get("config") or {}
+    group_by, pivot, value = cfg.get("groupBy") or [], cfg.get("pivotField"), cfg.get("valueField")
+    agg = cfg.get("agg") or "FIRST"
+    if not group_by:
+        res.errors.append(_err("DSL_INVALID", "请选择分组字段"))
+    if not pivot or not value:
+        res.errors.append(_err("DSL_INVALID", "请选择「转成列的字段」和「值字段」"))
+    if agg not in PIVOT_AGGS:
+        res.errors.append(_err("DSL_INVALID", f"不支持的合并方式 {agg}"))
+    for f in [*group_by, pivot, value]:
+        if f and src.get(f) is None:
+            res.errors.append(_err("FIELD_NOT_FOUND", f"字段「{f}」不存在"))
+    if pivot and pivot in group_by or value and value in group_by:
+        res.errors.append(_err("DSL_INVALID", "分组字段不能同时作为转列字段或值字段"))
+    cols = [ColumnSchema(f, src.get(f).type, True, src.get(f).origin) for f in group_by if src.get(f)]
+    names = set(group_by)
+    vt = src.get(value).type if value and src.get(value) else "string"
+    specs = cfg.get("columns") or []
+    if not specs and not res.errors:
+        res.warnings.append(_err("PIVOT_NO_COLUMNS", "还没有配置要生成的列：点「从数据生成列」"))
+    for c in specs:
+        f = c.get("field") or ""
+        if not FIELD_NAME.match(f) or f in RESERVED_FIELDS:
+            res.errors.append(_err("DSL_INVALID", f"列「{c.get('value')}」的字段名「{f}」不合法"))
+            continue
+        if f in names:
+            res.errors.append(_err("DSL_INVALID", f"字段名「{f}」重复"))
+            continue
+        names.add(f)
+        cols.append(ColumnSchema(f, c.get("type") or _pivot_value_type(agg, vt)))
+    res.outputs["out"] = PortSchema(cols, False)
+    return res
+
+
+def _agg(agg: str, vals: list) -> Any:
+    xs = [v for v in vals if v is not None]
+    if agg == "COUNT":
+        return len(xs)
+    if not xs:
+        return None
+    if agg == "FIRST":
+        return xs[0]
+    if agg == "MAX":
+        return max(xs)
+    if agg == "MIN":
+        return min(xs)
+    total = sum(xs)
+    return total / len(xs) if agg == "AVG" else total
+
+
+def run_pivot(node, inputs, ctx: RunContext):
+    ds: Dataset = inputs["in"]
+    cfg = node.get("config") or {}
+    group_by, pivot, value = cfg["groupBy"], cfg["pivotField"], cfg["valueField"]
+    agg = cfg.get("agg") or "FIRST"
+    specs = cfg.get("columns") or []
+    by_value = {norm_text(str(c["value"])): c for c in specs}
+    out_schema = infer_pivot(node, {"in": PortSchema(ds.columns)}).outputs["out"]
+    groups: dict[tuple, dict] = {}
+    unknown: Counter = Counter()
+    for i, r in enumerate(ds.rows):
+        key = tuple(key_norm(r.get(g)) for g in group_by)
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"first": i, "cells": defaultdict(list)}
+        pv = r.get(pivot)
+        if pv is None or norm_text(str(pv)) == "":
+            continue
+        spec = by_value.get(norm_text(str(pv)))
+        if spec is None:
+            unknown[norm_text(str(pv))] += 1
+            continue
+        g["cells"][spec["field"]].append((r.get(value), ds.lineage[i].get(value)))
+    out = Dataset(out_schema.columns)
+    for k, g in enumerate(groups.values()):
+        i = g["first"]
+        row = {f: ds.rows[i].get(f) for f in group_by}
+        lin = {f: ds.lineage[i].get(f) for f in group_by}
+        for spec in specs:
+            items = g["cells"].get(spec["field"], [])
+            vals = [v for v, _ in items]
+            if agg == "FIRST" and len({str(v) for v in vals if v is not None}) > 1:
+                cells = [c for _, c in items if isinstance(c, str)]
+                ctx.issue("WARN", "PIVOT_DUPLICATE", f"分组「{'/'.join(str(row[f]) for f in group_by)}」的「{spec['value']}」有 {len(vals)} 个不同的值，取第一个；如需合计请把合并方式改为求和",
+                          cell=cells[0] if cells else None, field=spec["field"], related=cells)
+            row[spec["field"]] = _agg(agg, vals)
+            lin[spec["field"]] = [c for _, c in items if c] or None
+        out.rows.append(row)
+        out.lineage.append(lin)
+        out.meta.append({**ds.meta[i], "rid": f"{ctx.node_id}/{k + 1}"})
+    for v, n in unknown.most_common():
+        ctx.issue("WARN", "PIVOT_UNKNOWN_VALUE", f"「{pivot}」出现了未配置成列的取值「{v}」（{n} 行），已忽略；可在节点中点「从数据生成列」补上")
+    return {"out": out}
+
+
 REGISTRY = {
     "EXCEL_SOURCE": (infer_source, None),
     "FILTER": (infer_filter, run_filter),
@@ -899,4 +1015,5 @@ REGISTRY = {
     "JOIN": (infer_join, run_join),
     "VALIDATOR": (infer_validator, run_validator),
     "SINK": (infer_sink, run_sink),
+    "PIVOT": (infer_pivot, run_pivot),
 }

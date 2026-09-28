@@ -240,6 +240,11 @@ def node_rows(job_id: int, node: str, port: str, offset: int = 0, limit: int = 5
     return ok(jobs.output_page(job_id, node, port, offset, min(limit, 500)))
 
 
+@router.get("/jobs/{job_id}/nodes/{node}/ports/{port}/distinct")
+def node_distinct(job_id: int, node: str, port: str, field: str):
+    return ok(jobs.distinct_values(job_id, node, port, field))
+
+
 # ---------------- 版本 ----------------
 @router.get("/pipelines/{pid}/revisions")
 def revisions(pid: int):

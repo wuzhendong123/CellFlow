@@ -416,3 +416,52 @@ def test_every_catalog_function_same_under_compiled_runner():
         interp = E.celpy.InterpretedRunner(E._ENV, E._ENV.compile(x), E._FUNCS)
         act = {k: E.to_cel(v) for k, v in row.items()}
         assert p.evaluate(row) == E.from_cel(interp.evaluate(act)), name
+
+
+def pivot_dsl(columns, agg="FIRST", group_by=("job",), pivot="level", value="baseHp"):
+    return {"dslVersion": "1.0", "pipelineCode": "p", "nodes": [
+        d.src_hero(),
+        {"id": "pv", "type": "PIVOT", "label": "分组转列", "config": {
+            "groupBy": list(group_by), "pivotField": pivot, "valueField": value, "agg": agg, "columns": columns}},
+    ], "edges": [d.e("e1", "src_hero", "out_hp", "pv", "in")]}
+
+
+def test_pivot_group_and_spread_values_into_columns():
+    """分组转列：按职业分组，等级 1~4 变成 4 列，值为血量；空交叉点为空；列顺序按配置。"""
+    cols = [{"value": str(i), "field": f"lv{i}"} for i in range(1, 5)]
+    a = analyze(pivot_dsl(cols))
+    assert a.ok, a.errors
+    out = a.schemas[("pv", "out")]
+    assert [(c.field, c.type, c.is_key) for c in out.columns] == [("job", "string", True), ("lv1", "int", False), ("lv2", "int", False),
+                                                                  ("lv3", "int", False), ("lv4", "int", False)]
+    r = run(pivot_dsl(cols))
+    rows = {x["job"]: x for x in r.outputs[("pv", "out")].rows}
+    assert rows["战士"] == {"job": "战士", "lv1": 100, "lv2": 120, "lv3": 150, "lv4": 180}
+    assert rows["法师"]["lv3"] is None and rows["法师"]["lv4"] == 90
+    lin = r.outputs[("pv", "out")].lineage[0]
+    assert lin["lv1"] and lin["lv1"][0].startswith("角色配置!")  # 可追溯到 Excel 单元格
+    assert not errs(r)
+
+
+def test_pivot_unknown_values_duplicates_and_aggregation():
+    cols = [{"value": "1", "field": "lv1"}, {"value": "2", "field": "lv2"}]
+    r = run(pivot_dsl(cols))
+    warn = [i for i in r.issues if i["code"] == "PIVOT_UNKNOWN_VALUE"]
+    assert {w["message"].split("「")[2].split("」")[0] for w in warn} == {"3", "4"}  # 未配置的取值给出提示而不是静默丢失
+    # 不分职业、只按一个常量分组：同一等级有多行 → 取第一个时提示，求和时合计
+    base = pivot_dsl([{"value": str(i), "field": f"lv{i}"} for i in range(1, 5)], group_by=("job",))
+    total = run({**base, "nodes": [base["nodes"][0], {**base["nodes"][1], "config": {**base["nodes"][1]["config"], "groupBy": ["job"], "agg": "SUM"}}]})
+    assert {x["job"]: x["lv1"] for x in total.outputs[("pv", "out")].rows} == {"战士": 100, "法师": 60, "射手": 80}
+    cnt = pivot_dsl([{"value": "1", "field": "n1"}], agg="COUNT")
+    a = analyze(cnt)
+    assert a.schemas[("pv", "out")].get("n1").type == "long"
+    assert run(cnt).outputs[("pv", "out")].rows[0]["n1"] == 1
+
+
+def test_pivot_design_time_errors():
+    assert "FIELD_NOT_FOUND" in a_errs(pivot_dsl([{"value": "1", "field": "lv1"}], pivot="nope"))
+    assert "DSL_INVALID" in a_errs(pivot_dsl([{"value": "1", "field": "1bad"}]))
+    assert "DSL_INVALID" in a_errs(pivot_dsl([{"value": "1", "field": "job"}]))  # 与分组字段重名
+    assert "DSL_INVALID" in a_errs(pivot_dsl([], group_by=()))
+    w = analyze(pivot_dsl([])).warnings
+    assert any(x["code"] == "PIVOT_NO_COLUMNS" for x in w)

@@ -101,6 +101,27 @@ def output_page(job_id: int, node: str, port: str, offset: int, limit: int) -> d
     return {"total": len(data["rows"]), "offset": offset, "columns": data["columns"], "rows": rows}
 
 
+def distinct_values(job_id: int, node: str, port: str, field: str, limit: int = 500) -> list[dict]:
+    """某端口输出中一个字段的不同取值（按出现顺序）及建议字段名，用于「分组转列」生成列。"""
+    from cellflow.engine.detect import field_name
+    from cellflow.engine.grid import norm_text
+
+    key = _output_key(job_id, node, port)
+    st = get_storage()
+    if not st.exists(key):
+        raise not_found("节点输出")
+    data = json.loads(gzip.decompress(st.get(key)))
+    counts: dict[str, int] = {}
+    for r in data["rows"]:
+        v = r.get(field)
+        if v is None or norm_text(str(v)) == "":
+            continue
+        k = norm_text(str(v))
+        counts[k] = counts.get(k, 0) + 1
+    used: set[str] = set()
+    return [{"value": v, "count": n, "field": field_name(v, i, used)} for i, (v, n) in enumerate(list(counts.items())[:limit])]
+
+
 def summarize(res: RunResult) -> dict:
     return {"error": res.error_count, "warn": res.warn_count,
             "info": sum(1 for i in res.issues if i["severity"] == "INFO")}

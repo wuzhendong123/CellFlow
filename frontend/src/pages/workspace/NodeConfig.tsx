@@ -93,6 +93,7 @@ export default function NodeConfig({ node, dsl, analysis, pipeline, sampleRows, 
       {node.type === "DERIVE" && <DeriveForm cfg={cfg} set={set} main={main} params={paramsCtx(dsl, analysis, node)} rows={rows} pv={pv} />}
       {node.type === "SELECT_RENAME" && <SelectForm cfg={cfg} set={set} main={main} />}
       {node.type === "UNION" && <span className="cf-muted">把多条结构相近的流连到「输入」端口，按字段名对齐，缺失字段为空。</span>}
+      {node.type === "PIVOT" && <PivotForm cfg={cfg} set={set} main={main} node={node} dsl={dsl} pipeline={pipeline} />}
       {node.type === "LOOKUP" && <LookupForm cfg={cfg} set={set} main={main} dict={inputSchema(dsl, analysis, node.id, "in_dict")} />}
       {node.type === "JOIN" && <JoinForm cfg={cfg} set={set} left={main} right={inputSchema(dsl, analysis, node.id, "in_right")} />}
       {node.type === "VALIDATOR" && <ValidatorForm node={node} cfg={cfg} set={set} main={main} dsl={dsl} analysis={analysis} params={paramsCtx(dsl, analysis, node)} rows={rows} pv={pv} />}
@@ -396,6 +397,73 @@ function SinkForm({ node, cfg, set, main, pipeline, dsl }: any) {
         {b.keyFields?.length ? <span>主键：{b.keyFields.join(", ")}</span> : <span className="cf-muted">未声明主键：只能整表替换，变更明细只区分新增/删除</span>}
       </Space>
       <BindingDrawer open={open} onClose={() => setOpen(false)} node={node} cfg={cfg} set={set} main={main} pipeline={pipeline} dsl={dsl} />
+    </Card>
+  );
+}
+
+function Opt({ label, children }: { label: string; children: React.ReactNode }) {
+  return <span className="cf-opt"><span className="cf-opt-label">{label}</span>{children}</span>;
+}
+
+const AGGS = [
+  { value: "FIRST", label: "取第一个" }, { value: "SUM", label: "求和" }, { value: "COUNT", label: "计数" },
+  { value: "MAX", label: "最大值" }, { value: "MIN", label: "最小值" }, { value: "AVG", label: "平均值" },
+];
+
+/** 分组转列（透视）：①分组字段 ②哪个字段的取值变成列 ③列里填哪个字段的值；「从数据生成列」按预览数据的取值自动建列。 */
+function PivotForm({ cfg, set, main, node, dsl, pipeline }: any) {
+  const { message } = App.useApp();
+  const [busy, setBusy] = useState(false);
+  const cols: any[] = cfg.columns || [];
+  const upd = (i: number, p: any) => set({ columns: cols.map((c, j) => (j === i ? { ...c, ...p } : c)) });
+  const generate = async () => {
+    const e = dsl.edges.find((x: any) => x.target.nodeId === node.id && x.target.portId === "in");
+    if (!e || !cfg.pivotField) return;
+    setBusy(true);
+    try {
+      // 用样例文件预览到上游节点，读出「转列字段」的所有取值
+      const j = await post("/api/jobs/test", { pipelineId: pipeline.id, preview: true, untilNodeId: e.source.nodeId, dsl });
+      const vals: any[] = await get(`/api/jobs/${j.jobId}/nodes/${e.source.nodeId}/ports/${e.source.portId}/distinct?field=${encodeURIComponent(cfg.pivotField)}`);
+      const have = new Set(cols.map((c) => String(c.value)));
+      const used = new Set(cols.map((c) => c.field).concat(cfg.groupBy || []));
+      const added = vals.filter((v) => !have.has(v.value)).map((v) => {
+        let f = v.field, k = 2;
+        while (used.has(f)) f = `${v.field}_${k++}`;
+        used.add(f);
+        return { value: v.value, field: f };
+      });
+      if (!vals.length) message.warning("预览数据里这个字段没有取值");
+      else if (!added.length) message.info("所有取值都已经生成过列了");
+      else message.success(`生成了 ${added.length} 列，字段名可以修改；不需要的列直接删除`);
+      if (added.length) set({ columns: [...cols, ...added] });
+    } catch (err: any) {
+      message.error(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const opts = options(main);
+  return (
+    <Card size="small" title="分组转列" id="pivot-form">
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <div className="cf-muted">例：按 localCurrency 分组，把 item 的每个取值变成一列，格子里填 value → 每个币种一行。</div>
+        <Opt label="① 按哪些字段分组"><Select id="pivot-group" size="small" mode="multiple" optionFilterProp="label" style={{ minWidth: 200 }} value={cfg.groupBy || []} options={opts} onChange={(v) => set({ groupBy: v })} /></Opt>
+        <Opt label="② 哪个字段的取值变成列"><Select id="pivot-field" size="small" showSearch optionFilterProp="label" style={{ minWidth: 180 }} value={cfg.pivotField} options={opts} onChange={(v) => set({ pivotField: v })} /></Opt>
+        <Opt label="③ 列里填哪个字段的值"><Select id="pivot-value" size="small" showSearch optionFilterProp="label" style={{ minWidth: 180 }} value={cfg.valueField} options={opts} onChange={(v) => set({ valueField: v })} /></Opt>
+        <Opt label="同一格有多个值时"><Select size="small" style={{ width: 120 }} value={cfg.agg || "FIRST"} options={AGGS} onChange={(v) => set({ agg: v })} /></Opt>
+        <Space>
+          <Button id="pivot-generate" type="primary" size="small" loading={busy} disabled={!cfg.pivotField} onClick={generate}>从数据生成列</Button>
+          <span className="cf-muted">{cols.length ? `已有 ${cols.length} 列` : "先选好 ②，再点这里"}</span>
+        </Space>
+        {cols.length > 0 && (
+          <Table size="small" rowKey={(_, i) => String(i)} pagination={false} dataSource={cols} scroll={{ y: 320 }} columns={[
+            { title: `${cfg.pivotField || "取值"}`, dataIndex: "value", ellipsis: true },
+            { title: "生成的字段名", dataIndex: "field", width: 170, render: (v, _, i) => <Input size="small" className="cf-mono" value={v} status={/^[A-Za-z_][A-Za-z0-9_]*$/.test(v || "") ? undefined : "error"} onChange={(e) => upd(i, { field: e.target.value.trim() })} /> },
+            { title: "", width: 36, render: (_: any, __: any, i: number) => <a onClick={() => set({ columns: cols.filter((_c, j) => j !== i) })}>✕</a> },
+          ]} />
+        )}
+        {cols.length > 0 && <div className="cf-muted">以后的文件里出现了没配置的取值，会给出警告提示（不会静默丢数据），再点一次「从数据生成列」即可补上。</div>}
+      </Space>
     </Card>
   );
 }

@@ -1,6 +1,6 @@
 // 画布 DSL 类型与工具（与后端 cellflow/engine/nodes.py 的端口定义保持一致）
 
-export type NodeType = "EXCEL_SOURCE" | "FILTER" | "DERIVE" | "SELECT_RENAME" | "UNION" | "LOOKUP" | "JOIN" | "VALIDATOR" | "SINK";
+export type NodeType = "EXCEL_SOURCE" | "FILTER" | "DERIVE" | "SELECT_RENAME" | "UNION" | "LOOKUP" | "PIVOT" | "JOIN" | "VALIDATOR" | "SINK";
 
 export interface DslNode {
   id: string;
@@ -40,6 +40,7 @@ export const NODE_META: Record<NodeType, { label: string; group: string; icon: s
   SELECT_RENAME: { label: "选列改名", group: "变换", icon: "☰", desc: "挑选需要的列、改列名、调整顺序。" },
   UNION: { label: "合并", group: "变换", icon: "∪", desc: "把多条结构相近的数据上下拼接（按列名对齐）。" },
   LOOKUP: { label: "查表映射", group: "变换", icon: "⇄", desc: "用一张字典表把编码翻译成名称，例如道具 ID → 道具名。" },
+  PIVOT: { label: "分组转列", group: "变换", icon: "⊞", desc: "按某字段分组，把另一字段的每个取值变成一列（行转列 / 透视），例如按币种分组、每个项目一列。" },
   JOIN: { label: "关联", group: "关联", icon: "⋈", desc: "两份数据按键左右关联（类似 SQL JOIN），例如奖励明细关联道具表。" },
   VALIDATOR: { label: "校验", group: "校验", icon: "✓", desc: "按规则检查数据：必填、唯一、范围、引用存在、与汇总对账等；不通过的行进「被拒」端口。" },
   SINK: { label: "输出到业务表", group: "输出", icon: "⛁", desc: "把数据写入一张 MySQL 业务表：选表、映射字段、选主键。" },
@@ -64,6 +65,7 @@ export function inputPorts(n: DslNode): PortSpec[] {
     case "DERIVE":
       return [{ id: "in", label: "输入", kind: "DATA" }, { id: "in_params", label: "参数", kind: "PARAM", optional: true }];
     case "SELECT_RENAME":
+    case "PIVOT":
     case "SINK":
       return [{ id: "in", label: "输入", kind: "DATA" }];
     case "UNION":
@@ -91,6 +93,7 @@ export function outputPorts(n: DslNode): PortSpec[] {
     case "SELECT_RENAME":
     case "UNION":
     case "LOOKUP":
+    case "PIVOT":
       return [{ id: "out", label: "输出", kind: "DATA" }];
     case "JOIN":
       return [{ id: "out_main", label: "输出", kind: "DATA" }, { id: "out_unmatched", label: "未匹配", kind: "DATA", side: true }];
@@ -113,6 +116,8 @@ export function defaultConfig(t: NodeType): any {
       return { columns: [] };
     case "UNION":
       return {};
+    case "PIVOT":
+      return { groupBy: [], pivotField: undefined, valueField: undefined, agg: "FIRST", columns: [] };
     case "LOOKUP":
       return { on: [], select: [], onMissing: "NULL" };
     case "JOIN":
