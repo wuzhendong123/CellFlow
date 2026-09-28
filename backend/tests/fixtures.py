@@ -176,3 +176,43 @@ def special(date1904: bool = False) -> bytes:
     ws.merge_cells("A8:B9")
     ws["A11"] = "  带不可见字符​ "
     return _bytes(wb)
+
+
+def complex_shapes(blocks: int = 12, servers: tuple = ("S1服", "S2服", "S3服"), s2_missing_col: bool = False,
+                   overlap_blocks: bool = False) -> bytes:
+    """分组明细、表单型、重复块、多 Sheet 同构。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "装备"
+    for j, h in enumerate(["名称", "攻击", "价格"], start=1):
+        ws.cell(1, j, h)
+    rows = [("【武器类】",), ("铁剑", 10, 100), ("钢剑", 20, 200), ("小计", 30, 300), ("【防具类】",), ("皮甲", 0, 50), ("小计", 0, 50)]
+    for i, r in enumerate(rows, start=2):
+        for j, v in enumerate(r, start=1):
+            ws.cell(i, j, v)
+    ws["B2"].value = None
+    f = wb.create_sheet("活动")
+    f["B3"], f["C3"] = "名称：", "中秋活动"
+    f["E3"], f["F3"] = "品质：", "史诗"
+    f["B4"], f["C4"] = "开始：", dt.datetime(2026, 9, 25)
+    h = wb.create_sheet("英雄")
+    step = 3 if overlap_blocks else 7
+    for k in range(blocks):
+        r = 1 + k * step
+        h.cell(r, 1, f"英雄：H{k + 1:03d}")
+        h.cell(r + 1, 1, "名称")
+        h.cell(r + 1, 2, f"英雄{k + 1}")
+        h.cell(r + 2, 1, "攻击")
+        h.cell(r + 2, 2, 100 + k)
+        h.cell(r + 3, 1, "防御")
+        h.cell(r + 3, 2, 50 + k)
+    for n, s in enumerate(servers):
+        sh = wb.create_sheet(s)
+        cols = ["道具ID", "数量"] if not (s2_missing_col and s == "S2服") else ["道具ID"]
+        for j, c in enumerate(cols, start=1):
+            sh.cell(1, j, c)
+        for i in range(3):
+            sh.cell(2 + i, 1, 5001 + i)
+            if len(cols) > 1:
+                sh.cell(2 + i, 2, (n + 1) * 10 + i)
+    return _bytes(wb)
