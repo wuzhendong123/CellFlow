@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import re
+
 import numpy as np
 
 from cellflow.engine.grid import SheetGrid, is_blank, norm_text
@@ -11,18 +14,61 @@ from cellflow.engine.shapes import parse_detail, suggest_shape
 MAX_REGIONS = 30
 
 
+def field_name(source: str, i: int, used: set[str], prefix: str = "col") -> str:
+    """由表头推荐字段名：以英文为主的表头转驼峰（Credit Support 信用支持 → creditSupport），否则 col1 / key1。"""
+    words = re.findall(r"[A-Za-z][A-Za-z0-9]*|[0-9]+", source or "")
+    letters = sum(len(w) for w in words if w[0].isalpha())
+    name = ""
+    if letters >= 4:
+        parts = [w for w in words if w[0].isalpha()] + [w for w in words if w[0].isdigit()]  # 数字不打头
+        name = (parts[0].lower() + "".join(w[:1].upper() + w[1:].lower() for w in parts[1:]))[:40]
+    if not name or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+        name = f"{prefix}{i + 1}"
+    base, k = name, 2
+    while name in used:
+        name = f"{base}_{k}"
+        k += 1
+    used.add(name)
+    return name
+
+
+def infer_type(values) -> str:
+    """按样例值推荐类型；有文本或混杂时为 string。"""
+    vals = [v for v in values if not is_blank(v)]
+    if not vals:
+        return "string"
+    if all(isinstance(v, bool) for v in vals):
+        return "bool"
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        if all(float(v).is_integer() and abs(v) < 1e15 for v in vals):
+            return "int" if all(abs(v) < 2**31 for v in vals) else "long"
+        return "float"
+    if all(isinstance(v, dt.datetime) for v in vals):
+        return "date" if all(v.hour == v.minute == v.second == 0 for v in vals) else "datetime"
+    if all(isinstance(v, dt.date) for v in vals):
+        return "date"
+    return "string"
+
+
 def suggest_region(g: SheetGrid, rect: Rect) -> dict:
-    """对一个矩形给出形态、定位方式与字段的推荐。"""
+    """对一个矩形给出形态、定位方式与字段（字段名、类型）的推荐。"""
     block = slice_block(g, rect)
     shape = suggest_shape(block)
     loc = suggest_locator(g, rect)
     columns = []
+    used: set[str] = set()
+    vals = block.values
     if shape in ("DETAIL", "SUMMARY"):
         hdr = parse_detail(slice_block(g, Rect(rect.r1, rect.c1, rect.r1, rect.c2)), {"headerRows": 1})
-        columns = [{"source": h, "field": f"col{i + 1}", "type": "string"} for i, h in enumerate(hdr.headers)]
+        for i, h in enumerate(hdr.headers):
+            sample = vals[1:51, i] if shape == "DETAIL" and i < vals.shape[1] else []
+            columns.append({"source": h, "field": field_name(h, i, used), "type": infer_type(sample)})
     elif shape == "KEY_VALUE":
-        columns = [{"source": norm_text(block.values[i, 0]), "field": f"key{i + 1}", "type": "string"}
-                   for i in range(block.values.shape[0]) if norm_text(block.values[i, 0])]
+        for i in range(vals.shape[0]):
+            key = norm_text(vals[i, 0])
+            if key:
+                v = vals[i, 1] if vals.shape[1] > 1 else None
+                columns.append({"source": key, "field": field_name(key, len(columns), used, "key"), "type": infer_type([v])})
     return {"shape": shape, "locator": loc, "columns": columns, "range": rect.to_json()}
 
 

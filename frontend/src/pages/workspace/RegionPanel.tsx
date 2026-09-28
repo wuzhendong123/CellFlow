@@ -307,10 +307,10 @@ function ColumnsForm({ region, upd }: { region: any; upd: (p: any) => void }) {
   const set = (i: number, p: any) => upd({ columns: cols.map((c, j) => (j === i ? { ...c, ...p } : c)) });
   return (
     <div>
-      <Table size="small" rowKey={(_, i) => String(i)} pagination={false} dataSource={cols}
+      <Table size="small" rowKey={(_, i) => String(i)} pagination={false} dataSource={cols} scroll={{ x: 640 }} className="field-table"
         columns={[
-          { title: "表头原文", dataIndex: "source", render: (v, _, i) => <Input size="small" value={v} onChange={(e) => set(i, { source: e.target.value })} /> },
-          { title: "字段名", dataIndex: "field", render: (v, _, i) => <Input size="small" className="cf-mono field-name" value={v} status={/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(v || "") ? undefined : "error"} onChange={(e) => set(i, { field: e.target.value })} /> },
+          { title: "表头原文", dataIndex: "source", width: 170, render: (v, _, i) => <Input size="small" value={v} onChange={(e) => set(i, { source: e.target.value })} /> },
+          { title: "字段名", dataIndex: "field", width: 160, render: (v, _, i) => <Input size="small" className="cf-mono field-name" value={v} status={/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(v || "") ? undefined : "error"} onChange={(e) => set(i, { field: e.target.value })} /> },
           { title: "类型", dataIndex: "type", width: 120, render: (v, _, i) => <Select size="small" style={{ width: 115 }} value={v || "string"} onChange={(x) => set(i, { type: x })} options={TYPES.map((t) => ({ value: t, label: t }))} showSearch /> },
           { title: "必填", dataIndex: "required", width: 44, render: (v, _, i) => <Checkbox checked={!!v} onChange={(e) => set(i, { required: e.target.checked })} /> },
           { title: "主键", dataIndex: "isKey", width: 44, render: (v, _, i) => <Checkbox checked={!!v} onChange={(e) => set(i, { isKey: e.target.checked })} /> },

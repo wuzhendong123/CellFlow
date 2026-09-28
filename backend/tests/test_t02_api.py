@@ -75,3 +75,16 @@ def test_detect_regions(client):
     assert [c["source"] for c in reward["columns"]] == ["奖励ID", "职业", "等级", "道具ID", "数量"]
     note = next(r for r in rs if r["range"]["startCol"] == 8)
     assert note["name"].startswith("填表说明")  # 标题行成为区域名称
+
+
+def test_field_name_and_type_suggestions():
+    from cellflow.engine.detect import field_name, infer_type
+
+    used: set[str] = set()
+    assert field_name("Credit Support 信用支持", 0, used) == "creditSupport"
+    assert field_name("Credit Support", 1, used) == "creditSupport_2"  # 重名加后缀
+    assert field_name("Mark-to-Market", 2, used) == "markToMarket"
+    assert field_name("2024 Total", 3, used) == "total2024"
+    assert field_name("奖励ID", 4, used) == "col5"  # 以中文为主的表头不硬取英文片段
+    assert infer_type([1, 2, None]) == "int" and infer_type([1.5, 2]) == "float" and infer_type([1, "a"]) == "string"
+    assert infer_type([3_000_000_000]) == "long" and infer_type([None]) == "string"

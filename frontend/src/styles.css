@@ -14,7 +14,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft
 .cf-palette.collapsed { width: 44px; }
 .cf-palette .item { border: 1px solid #d9d9d9; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; cursor: grab; background: #fafafa; font-size: 12px; }
 .cf-canvas { flex: 1; min-width: 200px; position: relative; }
-.cf-config { width: 380px; border-left: 1px solid #eee; overflow: auto; padding: 12px; }
+.cf-config { width: 440px; border-left: 1px solid #eee; overflow: auto; padding: 12px; }
 .cf-sheet { flex: 1.5; display: flex; flex-direction: column; min-width: 300px; border-right: 1px solid #eee; }
 .cf-sheet-host { flex: 1; position: relative; }
 .cf-splitter { width: 6px; cursor: col-resize; background: #f0f0f0; }
@@ -40,3 +40,4 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft
 .cf-warn { color: #d46b08; }
 .cf-banner-frozen { background: #f9f0ff; color: #531dab; padding: 6px 16px; border-bottom: 1px solid #d3adf7; }
 .cf-row-error td { background: #fff1f0 !important; }
+.field-table .ant-table-thead th { white-space: nowrap; }
