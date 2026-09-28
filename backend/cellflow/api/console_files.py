@@ -54,11 +54,12 @@ class SuggestIn(BaseModel):
     fileId: int
     sheet: str
     range: dict
+    shape: str | None = None  # 指定形态时按该形态推荐字段（切换形态时用）
 
 
 @router.post("/regions/suggest")
 def suggest(body: SuggestIn):
-    return ok(suggest_region(_grid(body.fileId, body.sheet), Rect.from_json(body.range)))
+    return ok(suggest_region(_grid(body.fileId, body.sheet), Rect.from_json(body.range), body.shape))
 
 
 class DetectIn(BaseModel):

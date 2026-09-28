@@ -88,3 +88,18 @@ def test_field_name_and_type_suggestions():
     assert field_name("奖励ID", 4, used) == "col5"  # 以中文为主的表头不硬取英文片段
     assert infer_type([1, 2, None]) == "int" and infer_type([1.5, 2]) == "float" and infer_type([1, "a"]) == "string"
     assert infer_type([3_000_000_000]) == "long" and infer_type([None]) == "string"
+
+
+def test_suggest_for_switched_shape_matrix(client):
+    """用户把区域切换成矩阵：按矩阵重新推荐形态参数与字段，预览能输出数据（而不是沿用明细的表头字段全为空）。"""
+    fid = upload(client, fixtures.hero_config()).json()["data"]["fileId"]
+    rng = {"startRow": 8, "startCol": 1, "endRow": 11, "endCol": 6}
+    s = client.post("/api/regions/suggest", json={"fileId": fid, "sheet": "角色配置", "range": rng, "shape": "MATRIX"}).json()["data"]
+    o = s["shapeOptions"]
+    assert s["shape"] == "MATRIX" and len(o["rowDims"]) == 1 and len(o["colDims"]) == 1
+    assert [c["source"] for c in s["columns"]] == o["rowDims"] + o["colDims"] + [o["valueName"]]
+    region = {"regionId": "r", "name": "血量", "shape": "MATRIX", "locator": {"type": "FIXED"}, "designRange": rng,
+              "shapeOptions": {**o, "totalMarkers": ["合计"]}, "columns": s["columns"]}
+    p = client.post("/api/regions/preview", json={"fileId": fid, "sheet": "角色配置", "region": region}).json()["data"]
+    rows = p["output"]["rows"]
+    assert rows and rows[0]["data"][o["valueName"]] == 100 and rows[0]["data"][o["colDims"][0]] == "Lv1"

@@ -27,14 +27,38 @@ export default function RegionPanel({ node, fileId, sheets, selection, issues, o
 
   const setRegions = (rs: any[]) => onChange({ ...cfg, regions: rs });
   const upd = (patch: any) => setRegions(regions.map((r) => (r.regionId === active ? { ...r, ...patch } : r)));
-  const updOpt = (patch: any) => upd({ shapeOptions: { ...(region?.shapeOptions || {}), ...patch } });
+  const updOpt = (patch: any) => {
+    const opts = { ...(region?.shapeOptions || {}), ...patch };
+    // 矩阵：维度名 / 值字段名改了，字段列表跟着改（字段来源就是这些名字）
+    if (region?.shape === "MATRIX" && ["rowDims", "colDims", "valueName", "rowHeaderCols", "colHeaderRows"].some((k) => k in patch)) {
+      const pad = (xs: string[], n: number, p: string) => Array.from({ length: n }, (_, i) => xs[i] || `${p}${i + 1}`);
+      opts.rowDims = pad(opts.rowDims || [], Number(opts.rowHeaderCols || 1), "row");
+      opts.colDims = pad(opts.colDims || [], Number(opts.colHeaderRows || 1), "col");
+      upd({ shapeOptions: opts, columns: matrixColumns(opts, region.columns || []) });
+      return;
+    }
+    upd({ shapeOptions: opts });
+  };
+
+  // 切换形态：原来的字段是按旧形态推荐的（比如明细的表头），换形态后按新形态重新推荐，否则输出全是空
+  const changeShape = async (shape: string) => {
+    if (!region) return;
+    if (!fileId || !region.designRange || shape === "IGNORE") { upd({ shape }); return; }
+    try {
+      const sug = await post("/api/regions/suggest", { fileId, sheet: currentSheet(), range: region.designRange, shape });
+      upd({ shape, shapeOptions: sug.shapeOptions || {}, columns: sug.columns || [] });
+      message.info("已按新形态重新推荐字段，可在「3 字段」里调整");
+    } catch {
+      upd({ shape });
+    }
+  };
 
   const currentSheet = () => (sheetRule.match === "EXACT" ? sheetRule.value : sheets[0]);
 
   const buildRegion = (sug: any, range: RangeJson, name: string, rid: string, port: string) => ({
     regionId: rid, name, shape: sug.shape, outputPortId: port,
     designRange: { ...range, a1: toA1(range) }, locator: sug.locator,
-    shapeOptions: sug.shape === "DETAIL" ? { headerRows: 1 } : sug.shape === "KEY_VALUE" ? { keyCol: 1, valueCol: 2 } : sug.shape === "MATRIX" ? { rowHeaderCols: 1, colHeaderRows: 1, rowDims: ["row"], colDims: ["col"], valueName: "value", dropEmpty: true } : {},
+    shapeOptions: sug.shapeOptions ? sug.shapeOptions : sug.shape === "DETAIL" ? { headerRows: 1 } : sug.shape === "KEY_VALUE" ? { keyCol: 1, valueCol: 2 } : sug.shape === "MATRIX" ? { rowHeaderCols: 1, colHeaderRows: 1, rowDims: ["row"], colDims: ["col"], valueName: "value", dropEmpty: true } : {},
     columns: sug.columns || [],
     recommended: { shape: sug.shape, locator: sug.locator?.type },
   });
@@ -156,7 +180,7 @@ export default function RegionPanel({ node, fileId, sheets, selection, issues, o
             {selection && <Button size="small" onClick={() => upd({ designRange: { ...selection, a1: toA1(selection) } })}>用当前选区</Button>}
           </Space>
           <Collapse size="small" defaultActiveKey={["1", "2", "3"]} items={[
-            { key: "1", label: "1 形态", children: <ShapeForm region={region} upd={upd} updOpt={updOpt} /> },
+            { key: "1", label: "1 形态", children: <ShapeForm region={region} upd={upd} updOpt={updOpt} onShape={changeShape} /> },
             { key: "2", label: "2 定位方式", children: <LocatorForm region={region} upd={upd} /> },
             { key: "3", label: "3 字段", children: region.shape === "IGNORE" ? <span className="cf-muted">屏蔽区不输出数据</span> : <ColumnsForm region={region} upd={upd} /> },
           ]} />
@@ -170,12 +194,21 @@ export default function RegionPanel({ node, fileId, sheets, selection, issues, o
   );
 }
 
-function ShapeForm({ region, upd, updOpt }: { region: any; upd: (p: any) => void; updOpt: (p: any) => void }) {
+function matrixColumns(opts: any, old: any[]): any[] {
+  const byName = new Map(old.map((c) => [c.source, c]));
+  const ident = (x: string) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : "");
+  const dims = [...(opts.rowDims || []), ...(opts.colDims || [])].map((d: string) => byName.get(d) || { source: d, field: ident(d) || d, type: "string", isKey: true });
+  const v = opts.valueName || "value";
+  const valueType = old.find((c) => !(opts.rowDims || []).includes(c.source) && !(opts.colDims || []).includes(c.source) && c.type && c.type !== "string")?.type || "float";
+  return [...dims, byName.get(v) || { source: v, field: ident(v) || "value", type: valueType }];
+}
+
+function ShapeForm({ region, updOpt, onShape }: { region: any; upd?: (p: any) => void; updOpt: (p: any) => void; onShape: (s: string) => void }) {
   const o = region.shapeOptions || {};
   const rec = region.recommended?.shape;
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
-      <Radio.Group id="shape-radio" value={region.shape} onChange={(e) => upd({ shape: e.target.value })} size="small"
+      <Radio.Group id="shape-radio" value={region.shape} onChange={(e) => onShape(e.target.value)} size="small"
         options={SHAPES.map((s) => ({ value: s.value, label: s.value === rec ? `${s.label}（推荐）` : s.label }))} />
       {region.shape === "DETAIL" && (
         <Space wrap>

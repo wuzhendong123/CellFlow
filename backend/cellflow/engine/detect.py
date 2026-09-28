@@ -50,15 +50,41 @@ def infer_type(values) -> str:
     return "string"
 
 
-def suggest_region(g: SheetGrid, rect: Rect) -> dict:
-    """对一个矩形给出形态、定位方式与字段（字段名、类型）的推荐。"""
+def matrix_options(vals) -> tuple[dict, list[dict]]:
+    """矩阵默认维度：左上角「职业\\等级」→ 行维度 + 列维度；否则左上角文字是列头的含义（如 Currency 货币），行维度叫 item。"""
+    used: set[str] = set()
+    tl = norm_text(vals[0, 0]) if vals.size else ""
+    parts = [x.strip() for x in re.split(r"[\\/]", tl) if x.strip()] if tl else []
+    if len(parts) == 2:
+        row = field_name(parts[0], 0, used, "row")
+        col = field_name(parts[1], 0, used, "col")
+    else:
+        row = field_name("item", 0, used)
+        col = field_name(tl, 0, used, "col") if tl else field_name("col", 0, used)
+    value = field_name("value", 0, used)
+    opts = {"rowHeaderCols": 1, "colHeaderRows": 1, "rowDims": [row], "colDims": [col], "valueName": value, "dropEmpty": True}
+    body = vals[1:, 1:].flat if vals.shape[0] > 1 and vals.shape[1] > 1 else []
+    columns = [{"source": row, "field": row, "type": "string", "isKey": True},
+               {"source": col, "field": col, "type": "string", "isKey": True},
+               {"source": value, "field": value, "type": infer_type(list(body))}]
+    return opts, columns
+
+
+DEFAULT_OPTIONS = {"DETAIL": {"headerRows": 1}, "KEY_VALUE": {"keyCol": 1, "valueCol": 2}, "SUMMARY": {}}
+
+
+def suggest_region(g: SheetGrid, rect: Rect, shape: str | None = None) -> dict:
+    """对一个矩形给出形态、定位方式、形态参数与字段（字段名、类型）的推荐；shape 指定时按该形态推荐字段。"""
     block = slice_block(g, rect)
-    shape = suggest_shape(block)
+    shape = shape or suggest_shape(block)
     loc = suggest_locator(g, rect)
     columns = []
     used: set[str] = set()
     vals = block.values
-    if shape in ("DETAIL", "SUMMARY"):
+    options = dict(DEFAULT_OPTIONS.get(shape, {}))
+    if shape == "MATRIX":
+        options, columns = matrix_options(vals)
+    elif shape in ("DETAIL", "SUMMARY"):
         hdr = parse_detail(slice_block(g, Rect(rect.r1, rect.c1, rect.r1, rect.c2)), {"headerRows": 1})
         for i, h in enumerate(hdr.headers):
             sample = vals[1:51, i] if shape == "DETAIL" and i < vals.shape[1] else []
@@ -69,7 +95,7 @@ def suggest_region(g: SheetGrid, rect: Rect) -> dict:
             if key:
                 v = vals[i, 1] if vals.shape[1] > 1 else None
                 columns.append({"source": key, "field": field_name(key, len(columns), used, "key"), "type": infer_type([v])})
-    return {"shape": shape, "locator": loc, "columns": columns, "range": rect.to_json()}
+    return {"shape": shape, "locator": loc, "columns": columns, "shapeOptions": options, "range": rect.to_json()}
 
 
 def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
