@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.5 草案（待评审，**未定稿**；待 `PRD.md` 确认后定稿） |
+| 文档版本 | v0.6 草案（待评审，**未定稿**；待 `PRD.md` 确认后定稿） |
 | 对应阶段 | KICKOFF 第 3 步「技术方案与数据模型」 |
 | 前置文档 | `PRD.md` 初稿已产出（待确认）；`WIREFRAME.md` 尚未产出；剩余问题列在 §14 |
 | 本版主要变化 | 按 2026-09-28 的确认结果（§0.2）调整：主流程改为**业务服务触发 → 自动校验 → 自动写入独占的 MySQL 业务表**；主键改为可选；回滚适配业务表 |
@@ -45,6 +45,9 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
 | D20 | 默认值 | 按推荐值，做成**系统设置**，控制台可修改；方案/表级配置可覆盖 | 新增 `cf_system_setting`（§3、§10.8） |
 | D21 | 键值区与明细关联 | 广播关联、参数端口、键值区纵向输出模式三种**都进 v1** | §4.3、§7.6、§8.4 |
 | D22 | 派生列 | 按函数库实现，跨行计算放 v2；删除 `column_mapping.transform`，计算只在派生列节点中做 | §5.5 |
+| D23 | 样例文件归属 | 样例文件**归属方案**，所有源节点共用；源节点只选择 Sheet（或多 Sheet 匹配规则） | 一次任务只有一个文件，运行时所有源节点读同一文件；§1、§3、§6.1 |
+| D24 | 外键引用 | 校验节点通过可见的**引用输入端口**接入被引用的流，外键规则只能引用已连接端口的字段 | 依赖关系全部体现为连线；§6.1、§9 |
+| D25 | 跨文件引用 | **暂不支持**：被引用数据必须与主数据在同一个文件中 | 「引用另一方案的线上数据」保留为 v2 方向 |
 
 ### 0.3 本版变化与影响面分析（按 KICKOFF §3.1）
 
@@ -83,7 +86,7 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
 
 | 概念 | 说明 |
 |---|---|
-| **Pipeline（解析方案）** | 针对一类文件的解析配置，有全局唯一编码 `code`（如 `hero_config`），业务服务按编码调用 |
+| **Pipeline（解析方案）** | 针对一类文件的解析配置，有全局唯一编码 `code`（如 `hero_config`），业务服务按编码调用。方案持有一份**样例文件**供设计期圈选与试跑（D23） |
 | **PipelineRevision（方案版本）** | DSL 的不可变版本。状态 `DRAFT → PUBLISHED`；同一时刻只有一个 `PUBLISHED` 版本对外生效 |
 | **DataSource（数据源）** | 目标 MySQL 实例/库的连接定义；凭证只存**引用名**，真实值来自环境变量/密钥管理 |
 | **TableBinding（表绑定）** | 方案的一个输出数据集 → 一张业务表：字段映射、写入策略、可选主键、安全闸阈值 |
@@ -191,6 +194,7 @@ CREATE TABLE cf_pipeline (
   name              VARCHAR(128) NOT NULL,
   datasource_id     BIGINT       NOT NULL,             -- 一个方案的所有目标表必须在同一 MySQL 实例（原子切换前提）
   published_rev_id  BIGINT,
+  sample_file_id    BIGINT,                            -- D23：方案级样例文件，所有源节点共用
   frozen            TINYINT(1)   NOT NULL DEFAULT 0,   -- 冻结后拒绝新任务（回滚后默认冻结，§10.6）
   owner             VARCHAR(64)  NOT NULL,
   created_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -517,7 +521,16 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 
 **表达式语言**：禁止 Python `eval/exec`。采用受限表达式，推荐 **CEL（Common Expression Language）**：无副作用、非图灵完备、可静态类型检查、有 Python/Java/Go/JS 多端实现（前端可做实时语法校验）。示例：`count > 0 && itemId != 0`、`level * 10 + 5`、`coalesce(icon, "default.png")`。FILTER / DERIVE / VALIDATOR 共用同一套表达式语言、函数库（§5.5）与参数引用（§8.4）。
 
-**节点通用端口**：FILTER / DERIVE / VALIDATOR 除数据输入端口外，还有一个可选的**参数端口** `in_params`（画布上以虚线区分），只接受单行流，用于在表达式中引用键值区参数（§8.4）。
+**节点端口类型**
+
+| 端口 | 所在节点 | 接受 | 用途 |
+|---|---|---|---|
+| 数据输入 `in` / `in_main` / `in_left` / `in_right` | 各节点 | 任意流 | 被处理的主数据 |
+| **参数端口** `in_params` | FILTER / DERIVE / VALIDATOR | **单行流**，只接一条线，在 `config.params` 中起别名；需要多个参数来源时，先用广播关联把它们合成一行 | 表达式中 `$p.<别名>.<字段>` 引用；RECONCILE 对账的汇总值（§8.4、§9） |
+| **引用输入** `in_ref_<别名>` | VALIDATOR | 多行流（可添加多个，各起别名） | 外键规则的被引用集合（D24，§9） |
+| 侧输出 `out_reject` / `out_unmatched` | DERIVE / VALIDATOR / JOIN | — | 被拒行、未匹配行 |
+
+**源节点只有输出端口**：两个源节点之间不能直接相连，需要各自连到关联 / 合并 / 查表映射 / 参数端口 / 引用输入等下游节点汇合。
 
 ### 5.5 派生列 DERIVE（D22）
 
@@ -593,7 +606,7 @@ def run_derive(cfg, inputs, ctx):
 
 ### 6.1 画布拓扑 JSON（PipelineRevision.dsl，含目标表绑定）
 
-示例场景：Sheet「角色配置」上方是全局开关 KV，中间是「职业×等级→基础血量」矩阵，下方是奖励明细，底部是总计行；另一个 Sheet「道具表」是道具主表。
+示例场景（同一个文件的两个 Sheet，由两个源节点分别读取，D23）：Sheet「角色配置」上方是全局开关 KV，中间是「职业×等级→基础血量」矩阵，下方是奖励明细，底部是总计行；另一个 Sheet「道具表」是道具主表。
 
 > 坐标约定：**1-based、闭区间**，与 Excel 行号/列号一致（A=1）；`a1` 仅用于展示，以数值字段为准。
 
@@ -601,6 +614,7 @@ def run_derive(cfg, inputs, ctx):
 {
   "dslVersion": "1.0",
   "pipelineCode": "hero_config",
+  "sampleFileId": 5012,
   "datasource": "game_cfg_mysql",
   "baseRev": 7,
   "nodes": [
@@ -768,21 +782,25 @@ def run_derive(cfg, inputs, ctx):
       "type": "VALIDATOR",
       "label": "奖励校验",
       "config": {
+        "params": {"total": "in_params"},
+        "refs": {"item": "in_ref_item"},
         "rules": [
           {"ruleId": "r1", "type": "NOT_NULL", "fields": ["itemId", "count"], "severity": "ERROR"},
           {"ruleId": "r2", "type": "EXPR", "expr": "count > 0", "severity": "ERROR",
            "message": "奖励数量必须大于 0"},
           {"ruleId": "r3", "type": "FOREIGN_KEY", "field": "itemId",
-           "ref": {"kind": "PORT", "nodeId": "src_item", "portId": "out_item", "field": "itemId"},
+           "ref": {"input": "item", "field": "itemId"},
            "severity": "ERROR"},
           {"ruleId": "r4", "type": "UNIQUE", "fields": ["job", "level", "itemId"], "severity": "WARN"},
           {"ruleId": "r5", "type": "RECONCILE",
-           "detailAgg": "sum(count)", "summaryField": "totalCount",
-           "summaryPort": "in_summary", "tolerance": 0, "severity": "ERROR"}
+           "detailAgg": "sum(count)", "summary": {"param": "total", "field": "totalCount"},
+           "tolerance": 0, "severity": "ERROR"}
         ]
       },
       "ports": {
-        "inputs": [{"portId": "in_main"}, {"portId": "in_summary", "optional": true}],
+        "inputs": [{"portId": "in_main"},
+                   {"portId": "in_params", "kind": "PARAM", "optional": true},
+                   {"portId": "in_ref_item", "kind": "REF", "optional": true}],
         "outputs": [{"portId": "out_pass"}, {"portId": "out_reject", "side": true}]
       }
     },
@@ -848,7 +866,8 @@ def run_derive(cfg, inputs, ctx):
     {"id": "e2", "source": {"nodeId": "src_hero", "portId": "out_reward"}, "target": {"nodeId": "join_reward_item", "portId": "in_left"}},
     {"id": "e3", "source": {"nodeId": "src_item", "portId": "out_item"},   "target": {"nodeId": "join_reward_item", "portId": "in_right"}},
     {"id": "e4", "source": {"nodeId": "join_reward_item", "portId": "out_main"}, "target": {"nodeId": "val_reward", "portId": "in_main"}},
-    {"id": "e5", "source": {"nodeId": "src_hero", "portId": "out_total"},  "target": {"nodeId": "val_reward", "portId": "in_summary"}},
+    {"id": "e5", "source": {"nodeId": "src_hero", "portId": "out_total"},  "target": {"nodeId": "val_reward", "portId": "in_params"}},
+    {"id": "e8", "source": {"nodeId": "src_item", "portId": "out_item"},   "target": {"nodeId": "val_reward", "portId": "in_ref_item"}},
     {"id": "e6", "source": {"nodeId": "val_reward", "portId": "out_pass"}, "target": {"nodeId": "sink_reward", "portId": "in"}},
     {"id": "e7", "source": {"nodeId": "src_hero", "portId": "out_global"}, "target": {"nodeId": "sink_global", "portId": "in"}}
   ]
@@ -862,7 +881,9 @@ def run_derive(cfg, inputs, ctx):
 3. Schema 推导：按拓扑序推导每个端口的列清单，检查下游引用字段存在、JOIN 键类型兼容、表达式可通过类型检查。
 4. SINK：`dataset` 名在方案内唯一；`keyFields` 可为空（D3），非空时必须存在于输入 Schema；为空时提示「只能使用 SWAP，变更明细只区分新增/删除」；`binding` 按 §10.3 检查策略可行性，所有 SINK 的目标表须在方案绑定的同一数据源内且未被其他方案占用（D9）。
 5. `side: true` 的端口允许悬空（不连线时仅进入问题报告）。
-6. `kind: PARAM` 的参数端口只能接入**单行流**（`KEY_VALUE` 的 `WIDE` 输出、`SUMMARY`，或经推导确定为单行的流）；表达式中的 `$p.<别名>.<字段>` 必须存在于所连参数流的 Schema。
+6. `kind: REF` 的引用输入必须有且只有一条入边；`refs` 中的别名与端口一一对应；外键规则的 `ref.input` 必须指向已连接的引用输入，`ref.field` 必须存在于其 Schema（D24）。删除被引用的源或连线时，相关规则在保存时报错。
+7. 所有 `EXCEL_SOURCE` 读取方案的同一个样例文件/任务文件（D23），源节点配置中不含文件，只含 Sheet 匹配规则。
+8. `kind: PARAM` 的参数端口只能接入**单行流**（`KEY_VALUE` 的 `WIDE` 输出、`SUMMARY`，或经推导确定为单行的流）；表达式中的 `$p.<别名>.<字段>` 必须存在于所连参数流的 Schema。
 
 ### 6.2 端口 Schema（推导结果，前端用于下拉和冲突提示）
 
@@ -1578,9 +1599,9 @@ def run_broadcast(cfg, left: Dataset, right: Dataset, ctx):
 | `REGEX` | `field, pattern` | `str.fullmatch`（正则需预编译并限制长度，防 ReDoS） |
 | `ENUM` | `field, values[]` | `isin` |
 | `UNIQUE` | `fields[]`（复合唯一） | `duplicated(keep=False)` |
-| `FOREIGN_KEY` | `field, ref` | 集合成员判断；`ref.kind` = `PORT`（本次流水线中另一条流）或 `DATASET`（**线上已发布**的数据集，按本次发布的基线版本读取） |
+| `FOREIGN_KEY` | `field, ref{input, field}` | 集合成员判断；被引用集合来自已连接的**引用输入端口**（D24）。引用另一方案的线上数据（跨文件）暂不支持（D25，v2 方向） |
 | `EXPR` | CEL 表达式 | 编译一次，逐行求值（或下推为向量化） |
-| `RECONCILE` | 明细聚合 vs SUMMARY 字段、容差 | 聚合比较，失败时 Issue 指向 SUMMARY 单元格 |
+| `RECONCILE` | 明细聚合 vs 参数端口中汇总流的字段（`summary{param, field}`）、容差 | 聚合比较，失败时 Issue 指向 SUMMARY 单元格 |
 | `ROW_COUNT` | `min, max` 或「相对线上版本变化不超过 ±x%」 | 防止误删半张表（**强烈建议默认开启**） |
 
 ### 9.2 规则 → 动态判定（非侵入）
@@ -1599,6 +1620,9 @@ def compile_rules(rules: list[dict], schema: Schema) -> list[CompiledRule]:
 
 def run_validator(cfg, inputs, ctx):
     df, lin = inputs["in_main"].df, inputs["in_main"].lineage
+    params = load_params(cfg.get("params", {}), inputs)             # 单行流，否则 PARAM_NOT_SINGLE_ROW
+    refs = {alias: inputs[port] for alias, port in cfg.get("refs", {}).items()}   # 引用输入（多行）
+    # FOREIGN_KEY：ref_set = set(normalize(refs[r["ref"]["input"]].df[r["ref"]["field"]].dropna()))
     failed_any = pd.Series(False, index=df.index)
     for rule in compile_rules(cfg["rules"], inputs["in_main"].schema):
         ok = rule.fn(df, inputs)                          # True = 通过；不修改 df（非侵入）
@@ -1899,6 +1923,8 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 派生列 | 引用自身或后面的列 / 与已有字段重名未声明 REPLACE | 保存时报错 |
 | 派生列 | 除以 0、转换失败 | 默认 ERROR 并定位到引用的单元格；可配置置空 + WARN |
 | 重复块 | 块之间重叠 / 块内字段超出块范围 | ERROR |
+| 引用 | 删除了被外键引用的源节点或连线 | 相关规则标红，保存时报错 |
+| 引用 | 被引用数据在另一个文件 | v1 不支持（D25）；需把引用数据放入同一文件的某个 Sheet |
 | 多 Sheet | 某个匹配到的 Sheet 缺少必填列 | ERROR 并指明是哪个 Sheet；其余 Sheet 的问题一并列出 |
 | 控制台 | 高危操作口令错误 | 403；连续 5 次锁定该 IP 10 分钟 |
 | 调用方 | 签名错误 / 重放 / 超频 | 401 / 拒绝 / 429 |
@@ -1975,7 +2001,7 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 形态 | DETAIL（多级表头、横向）/ KV（WIDE、LONG）/ MATRIX（多级）/ SUMMARY / IGNORE / **GROUPED_DETAIL / FORM / REPEATING_BLOCK** | — |
 | 清洗 | L1、L3 全量（含 list/struct 拆分） | — |
 | 变换 | FILTER / DERIVE（含函数库）/ SELECT_RENAME / UNION / LOOKUP；参数端口 | WINDOW（跨行）/ EXPLODE / NEST / AGGREGATE / DEDUP / PIVOT |
-| 关联/校验 | JOIN（INNER/LEFT/**BROADCAST**）+ 冲突消解 + 爆炸拦截；全部校验规则 | FULL JOIN；跨方案外键 |
+| 关联/校验 | JOIN（INNER/LEFT/**BROADCAST**）+ 冲突消解 + 爆炸拦截；全部校验规则（外键通过引用输入端口） | FULL JOIN；跨方案/跨文件外键（D25） |
 | Open API | 直接上传提交、查询、问题列表、回调、`VALIDATE_ONLY` | 批量提交、MQ 事件 |
 | 写入 | SWAP、安全闸 G1~G8、崩溃恢复、基线快照 | APPLY_DIFF、写入时间窗 |
 | 回滚 | 快路径（备份表互换）+ 常规路径（快照重写）、冻结 | 按表部分回滚、回滚通知 |
