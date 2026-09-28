@@ -41,3 +41,5 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft
 .cf-banner-frozen { background: #f9f0ff; color: #531dab; padding: 6px 16px; border-bottom: 1px solid #d3adf7; }
 .cf-row-error td { background: #fff1f0 !important; }
 .field-table .ant-table-thead th { white-space: nowrap; }
+.cf-opt { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.cf-opt-label { color: rgba(0,0,0,.65); }

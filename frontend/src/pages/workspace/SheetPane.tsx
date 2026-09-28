@@ -100,10 +100,16 @@ export default function SheetPane({ fileId, sheets, sheet, onSheet, overlays, hi
       .finally(() => setLoading(false));
   }, [fileId, sheet, rowsLoaded]);
 
+  // 只有区域范围 / 颜色变化才需要重建工作簿（改字段名等配置不应触发重建，否则会抢走输入焦点）
+  const overlayKey = JSON.stringify(overlays.map((o) => [o.range.startRow, o.range.startCol, o.range.endRow, o.range.endCol, o.color, !!o.ignore]));
+
   // 生成工作簿：值 + 覆盖层样式
   useEffect(() => {
     const univerAPI = api.current;
     if (!univerAPI || !snap) return;
+    // 重建工作簿时 Univer 会把焦点抢到它的单元格编辑器；如果用户正在别处输入，事后把焦点还回去
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const keepFocus = prevFocus && prevFocus !== document.body && !host.current?.contains(prevFocus) ? prevFocus : null;
     if (unitId.current) {
       try { univerAPI.disposeUnit(unitId.current); } catch { /* 已释放 */ }
     }
@@ -159,6 +165,12 @@ export default function SheetPane({ fileId, sheets, sheet, onSheet, overlays, hi
     };
     const wb = univerAPI.createWorkbook(data);
     unitId.current = wb.getId();
+    if (keepFocus) {
+      const restore = () => { if (keepFocus.isConnected && document.activeElement !== keepFocus) keepFocus.focus({ preventScroll: true }); };
+      restore();
+      setTimeout(restore, 0);
+      requestAnimationFrame(restore);
+    }
     try { wb.setEditable(false); } catch { /* 旧版本无此方法 */ }
     if (highlight?.cell) {
       const rc = a1ToRC(highlight.cell);
@@ -170,7 +182,8 @@ export default function SheetPane({ fileId, sheets, sheet, onSheet, overlays, hi
         } catch { /* 忽略 */ }
       }
     }
-  }, [snap, overlays, highlight, fileId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snap, overlayKey, highlight, fileId]);
 
   // 聚焦某个区域（点击区域列表）
   useEffect(() => {
