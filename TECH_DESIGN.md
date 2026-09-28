@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.4 草案（待评审，**未定稿**；待 `PRD.md` 确认后定稿） |
+| 文档版本 | v0.5 草案（待评审，**未定稿**；待 `PRD.md` 确认后定稿） |
 | 对应阶段 | KICKOFF 第 3 步「技术方案与数据模型」 |
 | 前置文档 | `PRD.md` 初稿已产出（待确认）；`WIREFRAME.md` 尚未产出；剩余问题列在 §14 |
 | 本版主要变化 | 按 2026-09-28 的确认结果（§0.2）调整：主流程改为**业务服务触发 → 自动校验 → 自动写入独占的 MySQL 业务表**；主键改为可选；回滚适配业务表 |
@@ -31,12 +31,20 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
 | D6 | 服务方式 | **业务服务提交文件触发解析，CellFlow 写业务表，业务服务读表** | 新增 Open API、任务队列、回调通知；§2、§6.5、§10.1 |
 | D7 | 审批 | **校验通过就自动写**，不经人工审批 | 人的控制点前移到「方案版本发布」；新增**自动安全闸**（§10.2）兜底 |
 | D8 | 业务库 | **MySQL** | 元数据库也统一用 MySQL 8；§3、§10.3 按 MySQL 语义设计 |
-| D9 | 表归属 | 每张业务表**由一个解析方案独占** | 可安全整表替换；任何非 CellFlow 的写入都视为「漂移」并告警 |
+| D9 | 表归属 | 每张业务表**由一个解析方案独占** | 可安全整表替换；任何非 CellFlow 的写入都视为「漂移」并拦截 |
 | D10 | 后端语言 | **Python**（3.11 + FastAPI + openpyxl + pandas） | §7 伪代码即实现语言 |
 | D11 | 辅助表 | DBA **接受**在业务库创建 `_cellflow_marker` | APPLY_DIFF 的崩溃恢复方案可行（§10.3、§10.4） |
 | D12 | 同方案多文件 | **只执行最新的一个** | 较早的任务标记为 `SUPERSEDED`，不写表（§10.1） |
 | D13 | 最终用户报错页 | **不需要** | 回调与 Open API 只返回结构化问题列表，不提供 `reportUrl`；Univer 高亮只在控制台内部使用 |
 | D14 | PRD | **需要**，先产出 `PRD.md` 确认后再定稿本文档 | 见 `PRD.md` |
+| D15 | 首批接入范围 | **所有类型的 Excel** → v1 增加复杂区域形态（分组明细、表单型、重复块）与多 Sheet 同构合并；`.xls/.csv` 与 APPLY_DIFF 仍在 v2 | §4.3、§7.7~§7.9、§15；v1 中需要 APPLY_DIFF 的表（有触发器/外键/被引用的自增 ID）在绑定时拒绝并说明原因 |
+| D16 | 交文件方式 | **只支持直接上传**（multipart） | 去掉 `fileRef`；文件大小上限取系统设置（默认 20MB） |
+| D17 | 只校验模式 | `VALIDATE_ONLY` **进 v1** | §6.5.1 |
+| D18 | 告警与通知 | **v1 不做**告警推送与回滚通知；只保留对提交方的任务结果回调 | 去掉 MQ 事件；问题只在控制台展示 |
+| D19 | 控制台登录 | **v1 不做登录**，仅内网部署；发布、放行、回滚、冻结/解冻、修改数据源/调用方/系统设置需输入**操作口令**并填写操作人；后续接入公司统一登录（SSO） | §6.5.2、§12；审计记录操作人（自填）+ 来源 IP |
+| D20 | 默认值 | 按推荐值，做成**系统设置**，控制台可修改；方案/表级配置可覆盖 | 新增 `cf_system_setting`（§3、§10.8） |
+| D21 | 键值区与明细关联 | 广播关联、参数端口、键值区纵向输出模式三种**都进 v1** | §4.3、§7.6、§8.4 |
+| D22 | 派生列 | 按函数库实现，跨行计算放 v2；删除 `column_mapping.transform`，计算只在派生列节点中做 | §5.5 |
 
 ### 0.3 本版变化与影响面分析（按 KICKOFF §3.1）
 
@@ -69,7 +77,7 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
  │ 2 绑定目标 MySQL 表、字段映射   │    │ 2 同方案只保留最新任务                 │    │ 发布历史 / 变更明细       │
  │ 3 试跑（PREVIEW / FULL 不写表）  │──▶│ 3 解析 → 校验 → 安全闸                  │──▶│ 一键回滚                  │
  │ 4 历史文件回归（新旧版本对比）   │    │ 4 通过：影子表灌数 → RENAME 原子切换     │    │ 安全闸拦截后的人工放行     │
- │ 5 发布方案版本（人的控制点）     │    │ 5 记录 Release + 快照 → 回调 / MQ 通知   │    │                         │
+ │ 5 发布方案版本（人的控制点）     │    │ 5 记录 Release + 快照 → 回调提交方       │    │                         │
  └──────────────────────────────┘    └────────────────────────────────────┘    └─────────────────────────┘
 ```
 
@@ -107,7 +115,7 @@ flowchart LR
 
   subgraph API[API 层 FastAPI]
     OA[Open API<br/>AppKey 鉴权 · 幂等]
-    CA[Console API<br/>用户鉴权 · RBAC]
+    CA[Console API<br/>内网 + 操作口令（v1）· SSO（后续）]
   end
 
   Q[[任务队列<br/>同方案只执行最新]]
@@ -123,7 +131,7 @@ flowchart LR
   META[(元数据 MySQL<br/>方案 · 任务 · 问题 · Release)]
   OBJ[(对象存储<br/>原始文件 · 快照 · 变更明细)]
   BIZ[(业务 MySQL<br/>方案独占的业务表)]
-  NOTI[回调 / MQ 通知]
+  NOTI[结果回调]
 
   BS -- 提交文件 --> OA --> Q --> ENG
   WEB --> CA --> META
@@ -160,7 +168,7 @@ flowchart LR
 ⑤ Diff：新快照 vs 线上指针所指 Release 的快照 → 变更摘要（无变化 → NO_CHANGE，不写表）
 ⑥ 安全闸：行数范围 / 删除比例 / 清空保护 / 目标表结构 / 漂移检测 → 任一不通过 → FAILED_GUARD
 ⑦ 写表：为每张目标表建影子表并灌数 → 校验行数 → 一条 RENAME TABLE 原子切换全部表 → 旧表保留为备份
-⑧ 记录 Release、更新线上指针 → 写 Outbox → 回调业务服务 / 发 MQ 事件
+⑧ 记录 Release、更新线上指针 → 写 Outbox → 回调提交任务的业务服务
 ```
 
 ### 2.3 Univer 数据来源（D5 已确认）
@@ -219,8 +227,8 @@ CREATE TABLE cf_table_binding (                        -- 属于某个方案版�
   table_name        VARCHAR(64)  NOT NULL,
   strategy          VARCHAR(16)  NOT NULL,             -- SWAP | APPLY_DIFF
   key_fields        JSON,                              -- 可为空（D3）
-  column_mapping    JSON         NOT NULL,             -- [{field, column, transform?}]
-  guards            JSON         NOT NULL,             -- §10.2 安全闸阈值
+  column_mapping    JSON         NOT NULL,             -- [{field, column}]；计算只在 DERIVE 节点中做（D22）
+  guards            JSON,                              -- §10.2 安全闸阈值；为空则取系统设置（D20）
   UNIQUE KEY uk_ds (revision_id, dataset),
   UNIQUE KEY uk_tbl (revision_id, table_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -345,13 +353,33 @@ CREATE TABLE cf_outbox (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   release_id        BIGINT,
   job_id            BIGINT,
-  channel           VARCHAR(16)  NOT NULL,             -- CALLBACK | MQ
+  channel           VARCHAR(16)  NOT NULL,             -- CALLBACK（v1 仅此一种，D18）
   target            VARCHAR(512) NOT NULL,
   payload           JSON         NOT NULL,
   status            VARCHAR(16)  NOT NULL DEFAULT 'PENDING',
   attempts          INT          NOT NULL DEFAULT 0,
   next_retry_at     DATETIME(3),
   KEY idx_status (status, next_retry_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ========== 系统设置与审计 ==========
+CREATE TABLE cf_system_setting (                       -- D20：全局默认值，控制台可修改（§10.8）
+  setting_key       VARCHAR(64)  PRIMARY KEY,
+  value_json        JSON         NOT NULL,
+  updated_by        VARCHAR(64)  NOT NULL,
+  updated_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE cf_audit_log (
+  id                BIGINT PRIMARY KEY AUTO_INCREMENT,
+  operator          VARCHAR(64)  NOT NULL,             -- v1 为操作人自填（D19），接入 SSO 后为登录账号
+  source_ip         VARCHAR(45)  NOT NULL,
+  action            VARCHAR(32)  NOT NULL,             -- PUBLISH_REVISION | FORCE_PUBLISH | ROLLBACK | FREEZE | UNFREEZE | EDIT_DATASOURCE | EDIT_CLIENT | EDIT_SETTING
+  target            VARCHAR(128) NOT NULL,
+  detail            JSON,                              -- 修改前后值等
+  reason            VARCHAR(512),
+  created_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_target (target, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
@@ -384,15 +412,15 @@ CREATE TABLE cf_outbox (
 | 形态 | 原始样子 | 打平结果 | 关键参数 | 分期 |
 |---|---|---|---|---|
 | `DETAIL` 明细 | 首行（或前 k 行）为表头，每行一条记录 | 每行 → 1 Row | `headerRows`（多级表头）、`headerJoiner`（如 `.`）、`orientation: ROW\|COLUMN`（**横向明细**：表头在第一列、每列一条记录，游戏配置常见） | MVP |
-| `KEY_VALUE` 键值 | A 列 Key、B 列 Value（可有 C 列类型/备注） | 整块 → 1 Row（转置） | `keyCol`、`valueCol`、`typeCol?`、`orientation`、`duplicateKey: ERROR\|LAST\|ARRAY` | MVP |
+| `KEY_VALUE` 键值 | A 列 Key、B 列 Value（可有 C 列类型/备注） | `WIDE`（默认）：整块 → 1 Row（转置）；`LONG`：每个 Key → 1 Row `{key, value}` | `keyCol`、`valueCol`、`typeCol?`、`orientation`、`duplicateKey: ERROR\|LAST\|ARRAY`、`outputMode: WIDE\|LONG`（D21，与明细的关联方式见 §8.4） | MVP |
 | `MATRIX` 矩阵 | 行头 × 列头，交叉点为值 | 每个非空交叉点 → 1 Row（逆透视） | `rowHeaderCols(n)`、`colHeaderRows(m)`（**多级维度**）、`rowDims[]`、`colDims[]`、`valueName`、`metricLevel?`（某一级列头是指标名时，逆透视后再横向展开）、`totalMarkers`（排除"合计"行列）、`dimParsers`（`"Lv.1"→1`） | MVP |
 | `SUMMARY` 汇总 | 底部"总计"行或 KV 式汇总块 | 1 Row（供对账） | `layout: ROW\|KV`、`labelMatch` | MVP |
 | `IGNORE` 屏蔽区 | 说明文字、备注、示例行 | 不产出；并从其他区域中**挖掉** | — | MVP |
-| `GROUPED_DETAIL` 分组明细 | 明细中穿插"【武器类】"分组标题行、小计行，或用**缩进/大纲级别**表示层级 | 每条明细 Row 附带分组字段（向下填充） | `groupRowDetector`（仅首格有值 / 样式加粗 / 正则）、`groupField`、`outlineAsLevel`、`subtotalDetector` | v2 |
-| `FORM` 表单/卡片 | 单元格散落在固定相对位置（如"名称：C3，品质：F3"） | 1 Row | `fields: {字段名: 相对锚点偏移}` | v2 |
-| `REPEATING_BLOCK` 重复块 | 同一布局的块重复 N 次（每个英雄一个 6×4 的卡片） | 每块 → 1 Row（块内按 FORM 或 KV 解析） | `blockAnchor`（正则，找所有块起点）或 `stride{dRow,dCol}`、`innerShape` | v2 |
+| `GROUPED_DETAIL` 分组明细 | 明细中穿插"【武器类】"分组标题行、小计行，或用**缩进/大纲级别**表示层级 | 每条明细 Row 附带分组字段（向下填充） | `groupRowDetector`（仅首格有值 / 样式加粗 / 正则）、`groupField`、`outlineAsLevel`、`subtotalDetector` | MVP（D15） |
+| `FORM` 表单/卡片 | 单元格散落在固定相对位置（如"名称：C3，品质：F3"） | 1 Row | `fields: {字段名: 相对锚点偏移}` | MVP（D15） |
+| `REPEATING_BLOCK` 重复块 | 同一布局的块重复 N 次（每个英雄一个 6×4 的卡片） | 每块 → 1 Row（块内按 FORM 或 KV 解析） | `blockAnchor`（正则，找所有块起点）或 `stride{dRow,dCol}`、`innerShape` | MVP（D15） |
 
-**源级扩展 `SHEET_SET`（v2）**：多个 Sheet 结构相同（如每个服/每个章节一个 Sheet），一次配置，按 `sheetPattern` 正则匹配，自动 UNION 并追加 `_sheet` 维度列。
+**源级扩展 `SHEET_SET`（v1，D15）**：多个 Sheet 结构相同（如每个服/每个章节一个 Sheet），一次配置，按 `sheetPattern` 正则匹配，自动 UNION 并追加 `_sheet` 维度列。
 
 **不作为区域形态、而放在清洗层处理的**：单元格内多值（`1001|1002`）、单元格内结构（`1001:5,1002:3`）、单元格内 JSON —— 这些是**列级**问题（§5.3），与区域形态正交。
 
@@ -477,7 +505,7 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | 节点 | 作用 | 分期 |
 |---|---|---|
 | `FILTER` | 按表达式过滤行 | MVP |
-| `DERIVE` | 新增/覆盖列（表达式） | MVP |
+| `DERIVE` | 新增/覆盖列（表达式），详见 §5.5 | MVP |
 | `SELECT_RENAME` | 选列、改名、排序 | MVP |
 | `UNION` | 多流上下合并（按列名对齐，缺列补空） | MVP |
 | `LOOKUP` | 维表映射（小表字典查找，比 JOIN 轻，保证不膨胀） | MVP |
@@ -487,7 +515,77 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | `DEDUP` | 按键去重（保留首/尾/报错） | v2 |
 | `PIVOT` | 逆透视的反向操作 | v2 |
 
-**表达式语言**：禁止 Python `eval/exec`。采用受限表达式，推荐 **CEL（Common Expression Language）**：无副作用、非图灵完备、可静态类型检查、有 Python/Java/Go/JS 多端实现（前端可做实时语法校验）。示例：`count > 0 && itemId != 0`、`level * 10 + 5`、`has(row.icon) ? row.icon : "default.png"`。
+**表达式语言**：禁止 Python `eval/exec`。采用受限表达式，推荐 **CEL（Common Expression Language）**：无副作用、非图灵完备、可静态类型检查、有 Python/Java/Go/JS 多端实现（前端可做实时语法校验）。示例：`count > 0 && itemId != 0`、`level * 10 + 5`、`coalesce(icon, "default.png")`。FILTER / DERIVE / VALIDATOR 共用同一套表达式语言、函数库（§5.5）与参数引用（§8.4）。
+
+**节点通用端口**：FILTER / DERIVE / VALIDATOR 除数据输入端口外，还有一个可选的**参数端口** `in_params`（画布上以虚线区分），只接受单行流，用于在表达式中引用键值区参数（§8.4）。
+
+### 5.5 派生列 DERIVE（D22）
+
+```json
+{"id": "derive_reward", "type": "DERIVE", "config": {
+  "params": {"global": "in_params"},
+  "columns": [
+    {"field": "rowId",    "expr": "rewardId * 100 + level",           "type": "long"},
+    {"field": "hp",       "expr": "int(baseHp * $p.global.hpRate)",   "type": "int"},
+    {"field": "tag",      "expr": "job + '_' + string(level)",        "type": "string"},
+    {"field": "grade",    "expr": "level >= 60 ? 'HIGH' : 'LOW'",     "type": "string"},
+    {"field": "iconPath", "expr": "coalesce(icon, 'default.png')",    "type": "string"},
+    {"field": "count",    "expr": "count * 2", "mode": "REPLACE",     "type": "int"}
+  ],
+  "onError": "ERROR"
+},
+ "ports": {"inputs": [{"portId": "in"}, {"portId": "in_params", "optional": true, "kind": "PARAM"}],
+           "outputs": [{"portId": "out"}, {"portId": "out_reject", "side": true}]}}
+```
+
+**语义规则**
+
+| 规则 | 说明 |
+|---|---|
+| 计算顺序 | 按 `columns` 顺序逐列计算；后面的列可引用前面已派生的列；引用自身或后面的列 → 保存时报错 |
+| 新增 / 覆盖 | 默认 `mode: ADD`，与已有字段同名 → 保存时报错；覆盖原字段需显式 `REPLACE` |
+| 类型 | 保存时推导表达式结果类型，与 `type` 不兼容 → 报错；输出 Schema 自动加入新字段 |
+| 空值 | 任一参与运算的操作数为空 → 结果为空，不报错；需要默认值时用 `coalesce()`；写入 NOT NULL 列由 G6/G8 拦截 |
+| 单行出错 | 除以 0、转换失败、溢出：`onError: ERROR`（默认）记 ERROR，定位到表达式所引用字段的**原始单元格**，该行进入 `out_reject`；`onError: NULL` 置空并记 WARN |
+| 血缘 | 派生字段的 `_lineage` = 所引用字段来源单元格的并集（含参数端口的键值区单元格） |
+| 安全 | CEL 沙箱；表达式长度 ≤ 1000 字符、单行求值步数上限 |
+| 不支持 | 跨行计算（上一行、累计、组内序号）→ v2 的 WINDOW 节点 |
+
+**v1 函数库**（CEL 内置 + CellFlow 注册的自定义函数，前后端同一份清单用于自动补全与校验）
+
+| 类别 | 函数 |
+|---|---|
+| 文本 | `len`, `upper`, `lower`, `trim`, `substr(s, start, len)`, `replace`, `split`, `join`, `startsWith`, `endsWith`, `contains`, `matches`, `format` |
+| 数学 | `+ - * / %`, `abs`, `round(x, n)`, `floor`, `ceil`, `min`, `max`, `clamp(x, lo, hi)` |
+| 条件与空值 | `a ? b : c`, `coalesce(a, b, ...)`, `isNull`, `x in [..]` |
+| 类型转换 | `int`, `double`, `string`, `bool`, `decimal(x, scale)` |
+| 日期 | `date(s)`, `datetime(s)`, `addDays`, `diffDays`, `formatDate(d, fmt)`, `timestamp(d)` |
+| 列表 | `size`, `list[i]`, `sum`, `exists`, `all`, `map`, `filter`（配合 §5.3 单元格内拆分得到的列表字段） |
+| 参数与行信息 | `$p.<别名>.<字段>`（§8.4）、`$row.index`（区域内序号，从 1 开始）、`$row.sheetRow`（Excel 行号） |
+
+```python
+def run_derive(cfg, inputs, ctx):
+    ds = inputs["in"]; df = ds.df.copy(); lin = [dict(l) for l in ds.lineage]
+    params, p_lin = load_params(cfg.get("params", {}), inputs)     # {"global": {...}}，必须恰好 1 行
+    bad = pd.Series(False, index=df.index)
+    for col in cfg["columns"]:
+        prog = compile_expr(col["expr"], schema=current_schema(df), params=params)   # 设计期已校验，这里命中缓存
+        if prog.vectorizable:                                       # 纯四则运算/比较 → pandas 整列运算
+            values, errs = prog.eval_vectorized(df, params)
+        else:
+            values, errs = prog.eval_rows(df, params, row_ctx=row_meta(lin))
+        for idx, err in errs.items():                               # 除 0 / 转换失败 / 溢出
+            cells = [lin[idx].get(f) for f in prog.referenced_fields] + prog.referenced_param_cells(p_lin)
+            if cfg.get("onError", "ERROR") == "ERROR":
+                ctx.issue("ERROR", "DERIVE_EVAL_FAILED", cell=first(cells), related=cells, message=err)
+                bad[idx] = True
+            else:
+                ctx.issue("WARN", "DERIVE_EVAL_FAILED", cell=first(cells), message=err)
+        df[col["field"]] = cast(values, col["type"])
+        for i in range(len(lin)):                                   # 派生字段血缘 = 引用字段来源并集
+            lin[i][col["field"]] = [lin[i].get(f) for f in prog.referenced_fields]
+    return {"out": Dataset(df[~bad], ...), "out_reject": Dataset(df[bad], ...)}
+```
 
 ---
 
@@ -764,6 +862,7 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 3. Schema 推导：按拓扑序推导每个端口的列清单，检查下游引用字段存在、JOIN 键类型兼容、表达式可通过类型检查。
 4. SINK：`dataset` 名在方案内唯一；`keyFields` 可为空（D3），非空时必须存在于输入 Schema；为空时提示「只能使用 SWAP，变更明细只区分新增/删除」；`binding` 按 §10.3 检查策略可行性，所有 SINK 的目标表须在方案绑定的同一数据源内且未被其他方案占用（D9）。
 5. `side: true` 的端口允许悬空（不连线时仅进入问题报告）。
+6. `kind: PARAM` 的参数端口只能接入**单行流**（`KEY_VALUE` 的 `WIDE` 输出、`SUMMARY`，或经推导确定为单行的流）；表达式中的 `$p.<别名>.<字段>` 必须存在于所连参数流的 Schema。
 
 ### 6.2 端口 Schema（推导结果，前端用于下拉和冲突提示）
 
@@ -845,14 +944,13 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | GET | `/open/v1/pipelines/{code}` | 方案当前生效版本、目标表清单、每张表的输出字段（便于调用方对接） |
 | GET | `/open/v1/pipelines/{code}/live` | 当前线上 Release（`releaseId`、发布时间、每表行数与校验和） |
 
-提交任务（`multipart/form-data`：`file` + `meta` JSON；或纯 JSON 使用 `fileRef`）：
+提交任务（`multipart/form-data`：`file` + `meta` JSON；只支持直接上传，D16）：
 
 ```json
 {
   "pipelineCode": "hero_config",
   "idempotencyKey": "biz-A-upload-20260928-0001",
   "mode": "EXECUTE",
-  "fileRef": null,
   "pinRevision": null,
   "callbackUrl": "https://biz-a.internal/cellflow/callback",
   "operator": "planner_zhang",
@@ -861,12 +959,12 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 ```
 
 - `mode`：`EXECUTE`（校验通过即写表）/ `VALIDATE_ONLY`（只解析校验，不写表；供调用方在自己的上传页面做「预检」）。
-- `fileRef`：调用方已放在对象存储中的文件键（**不接受任意 URL**，防 SSRF）。
+- 文件大小上限取系统设置 `file.maxSizeMB`（默认 20MB），超过返回 413。
 - `idempotencyKey`：同一调用方内唯一；重复提交返回首个任务，不重复执行。
 - `pinRevision`：通常为空，使用方案当前生效版本；灰度或回放时可指定。
 - `operator`：透传的最终操作人，仅用于审计展示。
 
-回调（及 MQ 事件）载荷，`X-CF-Signature` 签名，失败按指数退避重试（最多 10 次），调用方需按 `jobId` 幂等：
+回调载荷，`X-CF-Signature` 签名，失败按指数退避重试（最多 10 次），调用方需按 `jobId` 幂等：
 
 ```json
 {
@@ -886,9 +984,10 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 
 `status` 可能为：`PUBLISHED` / `NO_CHANGE` / `SUPERSEDED` / `FAILED_VALIDATION` / `FAILED_GUARD` / `FAILED_WRITE` / `FAILED`；失败时附 `issues` 前 50 条（含 `sheet/cell/field/value/message`），完整列表通过 `GET /open/v1/jobs/{jobId}/issues` 分页获取。
 
-另有 `event: "RELEASE_ROLLED_BACK"`：人工回滚后通知同一方案的订阅方。
 
 #### 6.5.2 Console API（Web 控制台）
+
+**v1 鉴权（D19）**：不做登录，仅内网部署。标记为 🔒 的高危接口需请求头 `X-CF-Op-Token`（与环境变量中配置的操作口令比对）和 `X-CF-Operator`（操作人姓名），并写入 `cf_audit_log`；口令连续错误 5 次锁定该 IP 10 分钟。接入 SSO 后，口令校验替换为角色权限校验，接口不变。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -903,13 +1002,17 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | POST | `/api/jobs/test` | 试跑（`mode=TEST`，`sampleRows?`、`untilNodeId?`），永不写表 |
 | GET | `/api/jobs/{jobId}/nodes/{nodeId}/ports/{portId}/rows` | 分页查看节点输出（含 `_lineage`） |
 | POST | `/api/pipelines/{id}/revisions/{rev}/regression` | 用最近 N 个成功任务的文件回归，返回新旧版本结果差异 |
-| POST | `/api/pipelines/{id}/revisions/{rev}/publish` | 发布方案版本 |
+| POST | `/api/pipelines/{id}/revisions/{rev}/publish` | 🔒 发布方案版本 |
 | GET | `/api/jobs` | 任务列表（按方案/调用方/状态/时间筛选） |
 | GET | `/api/jobs/{jobId}/issues` | 问题列表（画布角标、Univer 高亮） |
-| POST | `/api/jobs/{jobId}/force-publish` | 安全闸拦截后人工放行（需管理员，填写理由，记为 `kind=FORCED`） |
+| POST | `/api/jobs/{jobId}/force-publish` | 🔒 安全闸拦截后人工放行（填写理由，记为 `kind=FORCED`） |
 | GET | `/api/pipelines/{id}/releases` | 发布历史 |
 | GET | `/api/releases/{id}/changes` | 变更明细（`?table=&op=`，分页读取对象存储文件） |
-| POST | `/api/pipelines/{id}/rollback` | `{targetReleaseId, expectedLiveReleaseId, reason}` |
+| POST | `/api/pipelines/{id}/rollback` | 🔒 `{targetReleaseId, expectedLiveReleaseId, reason, freeze}` |
+| POST | `/api/pipelines/{id}/freeze` \| `/unfreeze` | 🔒 冻结 / 解冻方案 |
+| PUT | `/api/datasources/{id}`、`/api/client-apps/{id}` | 🔒 修改数据源 / 调用方 |
+| GET / PUT | `/api/settings` | 查看 / 🔒 修改系统设置（§10.8） |
+| GET | `/api/audit-logs` | 审计日志查询 |
 
 ### 6.6 错误码（节选）
 
@@ -918,6 +1021,10 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
 | `AUTH_INVALID_SIGNATURE` / `AUTH_PIPELINE_FORBIDDEN` | 401 / 403 | 签名错误 / 调用方无权调用该方案 |
 | `RATE_LIMITED` | 429 | 调用方超过频率限制 |
 | `PIPELINE_NOT_PUBLISHED` / `PIPELINE_FROZEN` | 422 | 方案没有已发布版本 / 方案已冻结（§10.6） |
+| `OP_TOKEN_INVALID` | 403 | 高危操作口令错误或缺少操作人 |
+| `PARAM_NOT_SINGLE_ROW` | ERROR | 参数端口或广播关联的右侧不是恰好 1 行 |
+| `DERIVE_EVAL_FAILED` | ERROR / WARN | 派生列表达式求值失败（除 0、转换失败、溢出） |
+| `STRATEGY_NOT_AVAILABLE` | 保存 | 目标表需要 APPLY_DIFF（触发器/外键/被引用自增 ID），v1 不支持，拒绝绑定 |
 | `FILE_TOO_LARGE` / `FILE_UNSUPPORTED` | 413 / 422 | 超过大小限制 / 非 xlsx（xlsm 只读数据、不执行宏） |
 | `SHEET_NOT_FOUND` | ERROR | 按 Sheet 匹配规则找不到 Sheet |
 | `ANCHOR_NOT_FOUND` / `ANCHOR_AMBIGUOUS` | ERROR / WARN | 锚点找不到 / 找到多个 |
@@ -1184,6 +1291,9 @@ def transpose_kv(b: Block, opt: dict) -> tuple[pd.DataFrame, list[dict]]:
             # LAST：直接覆盖
         record[key], lin[key] = val, b.addr(i, vc)
         if tc is not None: types[key] = vals[i, tc - 1]     # "带类型声明的 KV"：交给 L3 做类型转换
+    if opt.get("outputMode", "WIDE") == "LONG":             # 纵向输出：每个 Key 一行，value 统一为文本
+        rows = [{"key": k, "value": to_text(v)} for k, v in record.items()]
+        return pd.DataFrame(rows, dtype=object), [{"key": lin[k], "value": lin[k]} for k in record]
     df = pd.DataFrame([record], dtype=object)               # 旋转 90°：N 行 KV → 1 行 N 列
     df.attrs["declaredTypes"] = types
     return df, [lin]
@@ -1191,7 +1301,7 @@ def transpose_kv(b: Block, opt: dict) -> tuple[pd.DataFrame, list[dict]]:
 # pandas 等价写法：pd.DataFrame(vals).set_index(kc)[vc].to_dict()（但丢失重复键检测与血缘）
 ```
 
-### 7.7 GROUPED_DETAIL 分组填充（v2）
+### 7.7 GROUPED_DETAIL 分组填充
 
 ```python
 def parse_grouped(b: Block, opt: dict):
@@ -1203,6 +1313,53 @@ def parse_grouped(b: Block, opt: dict):
         if is_subtotal(row, opt.get("subtotalDetector")): continue
         keep.append(idx); df.at[idx, opt["groupField"]] = group_val
     return df.loc[keep].reset_index(drop=True), [lineage[i] for i in keep]
+```
+
+### 7.7.1 FORM 表单型 与 REPEATING_BLOCK 重复块
+
+```python
+def parse_form(b: Block, opt: dict):
+    """字段散落在相对区域左上角的固定偏移处，如 {"name": {"row": 0, "col": 2}, "quality": {"row": 0, "col": 5}}"""
+    rec, lin = {}, {}
+    for field, off in opt["fields"].items():
+        if off["row"] >= b.values.shape[0] or off["col"] >= b.values.shape[1]:
+            raise LocateError("FORM_FIELD_OUT_OF_RANGE", field)
+        rec[field], lin[field] = b.values[off["row"], off["col"]], b.addr(off["row"], off["col"])
+    return pd.DataFrame([rec], dtype=object), [lin]
+
+def parse_repeating(grid: SheetGrid, region_rect: Rect, opt: dict):
+    """在区域内找出所有块起点，每块按 innerShape（FORM / KEY_VALUE）解析为 1 行"""
+    if "blockAnchor" in opt:                                  # 正则匹配所有块标题，如 "^英雄[:：]"
+        starts = find_cells(grid, opt["blockAnchor"], "REGEX", scope=region_rect)
+    else:                                                     # 固定步长
+        starts = [Cell(r, c) for r in range(region_rect.r1, region_rect.r2 + 1, opt["stride"]["dRow"] or 1)
+                             for c in range(region_rect.c1, region_rect.c2 + 1, opt["stride"]["dCol"] or 1)]
+    frames, lineage = [], []
+    for k, s0 in enumerate(sorted(starts)):
+        rect = Rect(s0.row, s0.col, s0.row + opt["blockSize"]["rows"] - 1, s0.col + opt["blockSize"]["cols"] - 1)
+        check_no_overlap(rect, previous_rects)                # 块之间重叠 → ERROR
+        df, lin = SHAPE_PARSERS[opt["innerShape"]](slice_block(grid, rect, masks=[]), opt["innerOptions"])
+        if opt.get("skipEmptyBlocks", True) and df.iloc[0].map(is_blank).all():
+            continue
+        df["_block"] = k + 1                                  # 块序号，可作为主键的一部分
+        frames.append(df); lineage += lin
+    return pd.concat(frames, ignore_index=True), lineage
+```
+
+### 7.7.2 SHEET_SET 多 Sheet 同构合并
+
+```python
+def run_sheet_set(cfg, ctx):
+    """EXCEL_SOURCE 的 sheet 配置为 {"match": "REGEX", "value": "^S\\d+服$", "asColumn": "server"}"""
+    names = [n for n in ctx.workbook_sheets() if re.fullmatch(cfg["sheet"]["value"], n)]
+    if not names: raise LocateError("SHEET_NOT_FOUND", cfg["sheet"])
+    per_port = defaultdict(list)
+    for n in names:                                           # 同一套区域配置逐 Sheet 执行，定位互不影响
+        out = ExcelSourceNode().run({**cfg, "sheet": {"match": "EXACT", "value": n}}, {}, ctx)
+        for port, ds in out.items():
+            ds.df[cfg["sheet"].get("asColumn", "_sheet")] = n  # 追加来源 Sheet 维度列
+            per_port[port].append(ds)
+    return {port: union_by_name(dss) for port, dss in per_port.items()}   # 字段不一致按 UNION 规则对齐并 WARN
 ```
 
 ### 7.8 L3 列级类型清洗
@@ -1363,6 +1520,51 @@ def run_join(cfg, left: Dataset, right: Dataset, ctx):
 - 报错信息给出「是哪几个键重复了、分别在 Excel 哪几行」，让策划能直接去改表。
 - `MANY_TO_MANY` 必须用户显式选择，并且只受绝对上限约束。
 
+### 8.4 键值区与明细的关联（D21）
+
+键值区输出默认只有 1 行，和明细没有共同的键，普通 JOIN 无法使用。按用途提供三种方式：
+
+| 场景 | 例子 | 方式 |
+|---|---|---|
+| A. 全局参数附加到每一行 | 键值区有「活动ID」「配置版本」，明细每行写表都要带上 | JOIN 的 `joinType: BROADCAST` |
+| B. 参数参与计算或校验 | `hp = baseHp * 血量系数`、`count <= 单次奖励上限` | 节点参数端口 `in_params` + 表达式 `$p.<别名>.<字段>` |
+| C. 明细按参数名查值 | 明细某列写「参数名」，需到键值区取值 | 键值区 `outputMode: LONG` → 普通 JOIN / LOOKUP（按 `key`） |
+
+**A. 广播关联**
+
+```json
+{"id": "attach_global", "type": "JOIN", "config": {
+  "joinType": "BROADCAST",
+  "leftAlias": "reward", "rightAlias": "global",
+  "select": ["reward.*", "global.activityId", "global.cfgVersion"],
+  "conflictPolicy": {"mode": "EXPLICIT_THEN_PREFIX", "aliases": {}}
+}}
+```
+
+```python
+def run_broadcast(cfg, left: Dataset, right: Dataset, ctx):
+    if len(right.df) != 1:                                    # 0 行：键值区为空；>1 行：多半连错了线
+        raise FatalNodeError("PARAM_NOT_SINGLE_ROW", rows=len(right.df))
+    attach = select_fields(right.df.iloc[0], cfg["select"], cfg["rightAlias"])     # 冲突消解规则同 §8.2
+    df = left.df.assign(**attach)                            # 每行附加相同的值；行数 = 左侧行数，不会膨胀
+    lin = [{**l, **{f: right.lineage[0][src] for f, src in attach_sources(cfg)}} for l in left.lineage]
+    return {"out_main": Dataset(df, lin, ...)}
+```
+
+- 附加字段的血缘指向**键值区单元格**：写表或校验出错时，高亮的是键值区里的那个值。
+- 不需要关联键、不做爆炸拦截（输出行数恒等于左侧行数）。
+
+**B. 参数端口**
+
+- FILTER / DERIVE / VALIDATOR 的 `in_params` 端口接入单行流，在 `config.params` 中给它起别名：`{"params": {"global": "in_params"}}`。
+- 表达式引用 `$p.global.hpRate`；保存时检查字段存在、类型兼容（§6.1 第 6 条）；运行时参数流不是恰好 1 行 → `PARAM_NOT_SINGLE_ROW`。
+- 与广播关联相比，不会把参数字段带到下游，适合「只用来算/校验，不写表」的参数。
+
+**C. 纵向输出**
+
+- 键值区 `outputMode: LONG` 输出 `{key, value}` 多行，`value` 统一为文本（各 Key 的类型可能不同），由下游 DERIVE 转换。
+- 同一个键值区可以只配一种输出模式；两种都需要时，框选同一区域两次，分别设置（允许 `KEY_VALUE` 区域之间重叠）。
+
 ---
 
 ## 9. VALIDATOR 校验节点
@@ -1460,7 +1662,7 @@ SUBMITTED → QUEUED ──(有更新的 EXECUTE 任务)────────
 
 ### 10.2 自动安全闸（替代人工审批的兜底）
 
-没有人工审批（D7），因此在写表之前按下列顺序自动检查，**任一不通过即不写表**：
+没有人工审批（D7），因此在写表之前按下列顺序自动检查，**任一不通过即不写表**。阈值默认值来自系统设置（§10.8），可在表绑定中覆盖：
 
 | # | 闸 | 默认阈值（`cf_table_binding.guards` 可按表配置） | 可否人工放行 |
 |---|---|---|---|
@@ -1470,10 +1672,10 @@ SUBMITTED → QUEUED ──(有更新的 EXECUTE 任务)────────
 | G4 | 删除比例：`删除行数 / 线上行数` | ≤ 30% | 可 |
 | G5 | 绝对行数范围 | `min/max` 未配置则不检查 | 可 |
 | G6 | 目标表结构兼容：每个映射列存在且类型兼容；表中未映射的列均可为空或有默认值 | 必须通过 | **不可** |
-| G7 | 漂移检测：业务表当前 `CHECKSUM TABLE` = 上次发布时记录的值 | 不一致 → 拒绝 | 可（覆盖并告警） |
+| G7 | 漂移检测：业务表当前 `CHECKSUM TABLE` = 上次发布时记录的值 | 不一致 → 拒绝 | 可（覆盖，记入审计） |
 | G8 | 值域：字符串长度、整数范围、DECIMAL 精度不超目标列定义 | 必须通过 | **不可**（否则 MySQL 严格模式会报错或非严格模式下静默截断） |
 
-- 拦截后任务为 `FAILED_GUARD`，回调给调用方，同时在控制台告警。管理员核实后可在控制台对**该任务的快照**执行「放行」，生成 `kind=FORCED` 的 Release，并记录理由。
+- 拦截后任务为 `FAILED_GUARD`，回调给调用方，并在控制台任务列表中标出（v1 不做告警推送，D18）。核实后可在控制台对**该任务的快照**执行「放行」，生成 `kind=FORCED` 的 Release，并记录理由。
 - 方案版本发布前的**历史文件回归**（§1、§6.5.2）是另一道防线：用新版本重跑最近 N 个成功任务的原始文件，对比新旧版本的输出，把「配置改错了」在上线前暴露出来。
 
 ### 10.3 写入策略（MySQL）
@@ -1608,22 +1810,44 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
             # 常规路径：从对象存储读取目标快照，走与正常任务相同的 SWAP / APPLY_DIFF 写入
             write_release_from_snapshots(target, kind="ROLLBACK", rollback_to=target.id)
         record_changes(diff(live, target))                     # 审计：本次回滚改了什么
-    notify_mq("RELEASE_ROLLED_BACK", pipeline_id, ...)
+    audit("ROLLBACK", pipeline_id, operator, reason)               # v1 不推送通知（D18）
 ```
 
 - **回滚不重新校验数据**（历史快照写入时已校验过），但必须重新检查目标表结构（G6）和漂移（G7）。
 - **回滚后默认冻结方案**：调用方此时再提交任务会得到 `PIPELINE_FROZEN`，直到有人修复 Excel 或方案后在控制台解冻。可在回滚时取消勾选。
 - 回滚只影响**数据**，不回滚**方案版本**；若故障由方案配置引起，需在控制台把方案版本切回旧版本（同样是一次发布动作）。
 - 回滚本身也是一个 Release，可以再被回滚（撤销回滚），历史线性可审计。
-- 快照保留期限决定可回滚的最远版本（默认保留最近 50 个 Release 或 180 天，取较大者，§14-Q7）。
+- 快照保留期限决定可回滚的最远版本（系统设置，默认保留最近 50 个 Release 或 180 天，取较大者）。
 
 为什么不按 `before` 逐条回放：跨多个版本回滚需要按顺序逐批回放，任何一批缺失即失败；期间表结构新增了字段时 `before` 中没有该字段；而快照方式一步写回目标状态，且可复用写入路径的全部保护。
 
 ### 10.7 通知
 
 - **回调**：发给提交任务的调用方（§6.5.1 载荷），经 Outbox 投递，签名 + 指数退避重试，调用方按 `jobId` 幂等。
-- **MQ 事件**（可选）：每个方案一个主题，`RELEASE_PUBLISHED` / `RELEASE_ROLLED_BACK`，供「读这些业务表、但不是提交方」的服务刷新缓存。
-- 通知只是**提醒**，数据以业务表为准；消费方漏收消息时可调用 `/open/v1/pipelines/{code}/live` 核对当前 `releaseId`。
+- v1 **不做**告警推送、回滚通知与 MQ 事件（D18）。回滚、安全闸拦截等只在控制台展示；读业务表的服务如需感知变化，可调用 `/open/v1/pipelines/{code}/live` 核对当前 `releaseId`。
+- 回调只是**提醒**，数据以业务表为准。
+
+### 10.8 系统设置（D20）
+
+所有默认值集中在 `cf_system_setting`，控制台「系统设置」页可修改（🔒 需操作口令，写审计）；优先级：**表绑定 / 方案配置 > 系统设置 > 代码内置默认值**。修改只影响之后开始执行的任务。
+
+| 设置键 | 默认值 | 说明 |
+|---|---|---|
+| `file.maxSizeMB` | 20 | 上传文件大小上限 |
+| `file.maxCells` | 500000 | 单文件有效单元格上限 |
+| `preview.sampleRows` | 200 | 试跑预览每个区域的采样行数 |
+| `guard.maxRowChangeRatio` | 0.5 | G3 行数波动上限 |
+| `guard.maxDeleteRatio` | 0.3 | G4 删除比例上限 |
+| `guard.forbidEmpty` | true | G2 清空保护 |
+| `guard.driftPolicy` | REJECT | G7 漂移处理：REJECT / OVERWRITE |
+| `join.maxOutputRows` | 1000000 | JOIN 输出行数绝对上限 |
+| `regression.fileCount` | 5 | 方案发布前回归使用的历史文件数 |
+| `retention.releases` / `retention.days` | 50 / 180 | 快照与原始文件保留（取较大者） |
+| `retention.backupTables` | 3 | 业务库中保留的备份表份数 |
+| `write.lockWaitTimeoutSec` / `write.renameRetries` | 3 / 5 | RENAME 等待元数据锁与重试 |
+| `write.maxConcurrentPerDatasource` | 2 | 每个数据源同时写入的任务数 |
+| `callback.maxAttempts` | 10 | 回调最大重试次数 |
+| `openapi.defaultRateLimitPerMin` | 60 | 新建调用方的默认限流 |
 
 ---
 
@@ -1631,7 +1855,7 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 
 | 类别 | Case | 处理策略 |
 |---|---|---|
-| 文件 | `.xls` 老格式 | v1 拒绝（`FILE_UNSUPPORTED`），提示另存为 xlsx；v2 服务端转换 |
+| 文件 | `.xls` / `.csv` | v1 拒绝（`FILE_UNSUPPORTED`），提示另存为 xlsx；v2 服务端转换 |
 | 文件 | `.xlsm` 含宏 | 只读数据，**绝不执行宏** |
 | 文件 | 超大文件 / zip 炸弹 | 上传限制（默认 20MB）、解压后大小与单元格数上限、Worker 内存与超时限制 |
 | 文件 | 同一文件重复提交 | 幂等键命中 → 返回原任务；内容与线上相同 → `NO_CHANGE` |
@@ -1659,7 +1883,8 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 目标表 | 自增主键未映射 | SWAP 会让 ID 每次变化 → 绑定时警告；ID 被引用时强制 APPLY_DIFF |
 | 目标表 | 有触发器 / 外键 | 强制 APPLY_DIFF（§10.3） |
 | 目标表 | DBA 修改了表结构 | 每次任务 G6 重新检查；影子表 `LIKE` 自动跟随新结构 |
-| 目标表 | 被其他程序写入（违反独占） | G7 漂移检测拦截并告警 |
+| 目标表 | 被其他程序写入（违反独占） | G7 漂移检测拦截，控制台标出 |
+| 目标表 | 有触发器 / 外键 / 被引用的自增 ID（需要 APPLY_DIFF） | v1 绑定时拒绝（`STRATEGY_NOT_AVAILABLE`），说明原因；v2 支持 |
 | 目标表 | 同一张表被绑定到两个方案 | `cf_table_owner` 主键冲突，绑定时拒绝（D9） |
 | 写入 | RENAME 等待元数据锁 | 3s 超时 + 退避重试，最终失败业务表不变 |
 | 写入 | 大表灌数导致从库延迟 | 分批写入，检测从库延迟超阈值时暂停 |
@@ -1669,11 +1894,17 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 并发 | 任务排队期间方案发布了新版本 | 使用提交时锁定的版本；回调中返回实际使用的版本号 |
 | 回滚 | 回滚后下一份文件马上又覆盖 | 回滚默认冻结方案 |
 | 回滚 | 目标快照已过保留期 | 不可选，控制台置灰 |
-| 通知 | 回调失败 | Outbox 重试，超过次数告警；调用方可主动查询任务状态 |
+| 通知 | 回调失败 | Outbox 重试，超过次数在控制台标出；调用方可主动查询任务状态 |
+| 键值关联 | 广播关联 / 参数端口的右侧为 0 行或多行 | `PARAM_NOT_SINGLE_ROW` |
+| 派生列 | 引用自身或后面的列 / 与已有字段重名未声明 REPLACE | 保存时报错 |
+| 派生列 | 除以 0、转换失败 | 默认 ERROR 并定位到引用的单元格；可配置置空 + WARN |
+| 重复块 | 块之间重叠 / 块内字段超出块范围 | ERROR |
+| 多 Sheet | 某个匹配到的 Sheet 缺少必填列 | ERROR 并指明是哪个 Sheet；其余 Sheet 的问题一并列出 |
+| 控制台 | 高危操作口令错误 | 403；连续 5 次锁定该 IP 10 分钟 |
 | 调用方 | 签名错误 / 重放 / 超频 | 401 / 拒绝 / 429 |
 | 编辑 | 多人同时编辑画布 | 草稿 `baseRev` 乐观锁 |
 | 安全 | 用户表达式 / 正则 | CEL 沙箱限步数；正则限长度 + 超时防 ReDoS |
-| 安全 | 文件引用 | 只接受对象存储键，不拉取任意 URL（防 SSRF） |
+| 安全 | 文件来源 | 只接受直接上传，不拉取任何 URL |
 
 ---
 
@@ -1681,15 +1912,15 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 
 | 项 | 设计 |
 |---|---|
-| 性能目标（建议值，待 PRD 确认） | 单文件 ≤ 20MB、≤ 50 万有效单元格：试跑预览 < 3s；解析 + 校验 < 30s；写表视行数而定（10 万行约 1 分钟内） |
+| 性能目标（默认值见系统设置） | 单文件 ≤ 20MB、≤ 50 万有效单元格：试跑预览 < 3s；解析 + 校验 < 30s；写表视行数而定（10 万行约 1 分钟内） |
 | 大文件 | openpyxl 普通模式内存约为文件大小的 30~50 倍；超过阈值的 Sheet 改用 `python-calamine` 快速读取值（新依赖，需审批） |
 | 执行隔离 | 任务在独立 Worker 进程执行，限制 CPU 时间/内存；API 进程不做解析 |
 | 吞吐 | 同方案只执行最新任务、方案间并行；每个数据源写入并发上限；调用方按 AppKey 限流 |
 | 缓存 | 同一 `fileId + sheet + loaderOptions` 的网格在 Worker 内 LRU 缓存，控制台连续调参时复用 |
-| 权限 | 控制台角色：查看者 / 编辑者（改方案、试跑）/ 发布者（发布方案版本）/ 管理员（放行安全闸、回滚、解冻、管理数据源与调用方） |
-| 审计 | 方案版本发布、任务、写入、放行、回滚、冻结/解冻全部留痕（谁、何时、哪个文件、哪个版本） |
-| 可观测 | 每个任务的节点行数/耗时/问题数；各方案成功率、安全闸拦截率；队列积压、Outbox 积压、写入耗时告警 |
-| 配置与密钥 | 数据库连接、对象存储、MQ、调用方签名密钥全部读取环境变量/密钥管理（KICKOFF §3.3），代码与文档中不出现真实值 |
+| 权限 | v1：仅内网部署，所有人可查看与编辑；高危操作需操作口令（D19）。后续接入 SSO 后启用角色：查看者 / 编辑者 / 发布者 / 管理员 |
+| 审计 | 方案版本发布、任务、写入、放行、回滚、冻结/解冻、数据源/调用方/系统设置修改全部写入 `cf_audit_log`（操作人、来源 IP、时间、对象、理由） |
+| 可观测 | 每个任务的节点行数/耗时/问题数；各方案成功率、安全闸拦截率、队列积压、回调积压在控制台展示（v1 不推送告警，D18） |
+| 配置与密钥 | 数据库连接、对象存储、调用方签名密钥、控制台操作口令全部读取环境变量/密钥管理（KICKOFF §3.3），代码与文档中不出现真实值 |
 
 ---
 
@@ -1708,7 +1939,8 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 元数据库 | **MySQL 8**（D8，与业务库同技术栈，分库部署） | JSON 列、团队运维熟悉 |
 | MySQL 驱动 | SQLAlchemy Core + PyMySQL | 需要精确控制 DDL 与事务，不用 ORM |
 | 快照 / 原始文件 | S3 兼容对象存储；快照格式 Parquet（pyarrow）或 JSONL.gz | 不可变、便宜、按需读取 |
-| 通知 | Outbox → HTTP 回调；可选接入公司现有 MQ | 不绑定具体中间件 |
+| 通知 | Outbox → HTTP 回调 | v1 只回调提交方 |
+| 控制台鉴权 | v1 操作口令；后续公司 SSO | 接口层预留统一的身份抽象，替换时接口不变 |
 
 > 按 KICKOFF §3.2，上述**第三方依赖需你确认后才会引入**。
 
@@ -1718,43 +1950,37 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 |---|---|---|
 | R1 | 没有人工审批，「格式合法但内容错误」的文件直接进线上 | 安全闸 G1~G8 + 方案发布前回归 + 一键回滚 + 回滚后冻结 |
 | R2 | RENAME 等待元数据锁拖住业务查询 | 短 `lock_wait_timeout` + 重试；写入避开业务高峰（可配置写入时间窗，v2） |
-| R3 | 业务表存在触发器/外键/被引用的自增 ID，SWAP 会破坏关联 | 绑定时自动检查并强制 APPLY_DIFF |
+| R3 | 业务表存在触发器/外键/被引用的自增 ID，SWAP 会破坏关联 | 绑定时自动检查；v1 拒绝绑定，v2 用 APPLY_DIFF |
 | R4 | 策划改表导致定位漂移 | ANCHOR/AUTO_EXPAND 定位器 + 定位报告 + 表头按名绑定 |
 | R5 | 公式缓存值缺失导致数据为空 | Loader 检测并报 ERROR |
 | R6 | 未声明主键时变更明细可读性差（修改显示为一删一增） | 绑定时若目标表有主键/唯一索引，自动**建议**同名字段作为主键（不强制） |
+| R8 | v1 无登录，只靠内网与共享口令 | 高危操作口令 + 审计 + IP 锁定；尽快接入 SSO |
+| R9 | v1 范围扩大（复杂形态、多 Sheet） | 形态解析器相互独立，可并行开发；优先交付 MVP 形态，复杂形态随后迭代 |
 | R7 | 业务库权限需要 DDL | 与 DBA 约定最小权限与专用账号；`_cellflow_marker` 表 DBA 已同意（D11） |
 
 ---
 
 ## 14. 待确认问题
 
-已确认的问题见 §0.2（D1~D14）。剩余问题已并入 `PRD.md` §8，确认后回填本节：
-
-| # | 问题 | 我的建议 |
-|---|---|---|
-| Q2 | 调用方如何把文件交给 CellFlow：直接上传（multipart）还是先放对象存储再传文件键？ | 两者都支持；大于 20MB 只允许文件键 |
-| Q3 | 是否需要 `VALIDATE_ONLY` 预检模式？ | 需要，成本低 |
-| Q6 | 安全闸默认阈值（行数波动 50%、删除比例 30%）是否合适？ | 先用默认值，按方案调整 |
-| Q7 | 快照与备份表保留多久？ | 快照：最近 50 个 Release 或 180 天；备份表：最近 3 份 |
-| Q9 | 性能目标（最大文件、最大行数、端到端时延） | 以 §12 建议值为起点 |
-| Q11 | APPLY_DIFF 是否进 v1？（辅助表已获 DBA 同意，技术上已无阻碍） | 取决于首批要接入的业务表中是否有触发器/外键/被引用的自增 ID |
+已确认的问题见 §0.2（D1~D22）。技术方案层面暂无待确认项；产品层面的剩余问题见 `PRD.md` §8。
 
 ---
 
 ## 15. 分期建议
 
-| 模块 | MVP（v1） | v2 |
+| 模块 | v1 | v2 |
 |---|---|---|
-| 源 | 单 xlsx、多 Sheet | SHEET_SET、xls/csv、公式重算 |
+| 源 | 单 xlsx、多 Sheet、**SHEET_SET 多 Sheet 同构合并** | xls/csv、公式重算 |
 | 定位器 | FIXED / ANCHOR / AUTO_EXPAND | NAMED_RANGE / EXCEL_TABLE |
-| 形态 | DETAIL（多级表头、横向）/ KV / MATRIX（多级）/ SUMMARY / IGNORE | GROUPED_DETAIL / FORM / REPEATING_BLOCK |
+| 形态 | DETAIL（多级表头、横向）/ KV（WIDE、LONG）/ MATRIX（多级）/ SUMMARY / IGNORE / **GROUPED_DETAIL / FORM / REPEATING_BLOCK** | — |
 | 清洗 | L1、L3 全量（含 list/struct 拆分） | — |
-| 变换 | FILTER / DERIVE / SELECT_RENAME / UNION / LOOKUP | EXPLODE / NEST / AGGREGATE / DEDUP / PIVOT |
-| 关联/校验 | JOIN（INNER/LEFT）+ 冲突消解 + 爆炸拦截；全部校验规则 | FULL JOIN；跨方案外键（引用其他方案的线上数据） |
-| Open API | 提交任务、查询、问题列表、回调、`VALIDATE_ONLY` | MQ 事件、批量提交 |
+| 变换 | FILTER / DERIVE（含函数库）/ SELECT_RENAME / UNION / LOOKUP；参数端口 | WINDOW（跨行）/ EXPLODE / NEST / AGGREGATE / DEDUP / PIVOT |
+| 关联/校验 | JOIN（INNER/LEFT/**BROADCAST**）+ 冲突消解 + 爆炸拦截；全部校验规则 | FULL JOIN；跨方案外键 |
+| Open API | 直接上传提交、查询、问题列表、回调、`VALIDATE_ONLY` | 批量提交、MQ 事件 |
 | 写入 | SWAP、安全闸 G1~G8、崩溃恢复、基线快照 | APPLY_DIFF、写入时间窗 |
-| 回滚 | 快路径（备份表互换）+ 常规路径（快照重写）、冻结 | 按表部分回滚 |
+| 回滚 | 快路径（备份表互换）+ 常规路径（快照重写）、冻结 | 按表部分回滚、回滚通知 |
 | 方案管理 | 版本发布、历史文件回归 | 灰度（按调用方指定版本）、模板市场 |
+| 控制台 | 内网 + 操作口令、审计日志、系统设置 | SSO 登录与角色权限、告警推送 |
 
 ---
 
