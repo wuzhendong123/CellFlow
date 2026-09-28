@@ -294,7 +294,7 @@ def parse_summary(block: Block, opt: dict, policy: RowPolicy | None = None, alig
     w = block.values.shape[1]
     headers = (headers + [f"_col_{to_a1(1, block.origin.c1 + j)[:-1]}" for j in range(len(headers), w)])[:w]
     headers, _ = dedupe_names(headers)
-    res = ShapeResult(headers)
+    res = ShapeResult(headers, internal_headers=True)
     for i in range(block.values.shape[0]):
         row = list(block.values[i, :])
         if all(is_blank(v) for v in row):

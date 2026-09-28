@@ -119,3 +119,65 @@ def src_item() -> dict:
 
 def region(src: dict, rid: str) -> dict:
     return next(r for r in src["config"]["regions"] if r["regionId"] == rid)
+
+
+def e(i, sn, sp, tn, tp):
+    return {"id": i, "source": {"nodeId": sn, "portId": sp}, "target": {"nodeId": tn, "portId": tp}}
+
+
+def sink(node_id, dataset, table, keys, mapping, guards=None):
+    return {"id": node_id, "type": "SINK", "label": f"输出:{dataset}", "config": {
+        "dataset": dataset,
+        "binding": {"table": table, "strategy": "SWAP", "keyFields": keys,
+                    "columnMapping": [{"field": f, "column": c} for f, c in mapping], "guards": guards},
+    }}
+
+
+def hero_dsl(with_derive: bool = True) -> dict:
+    """§6.1 示例方案：两源 + 关联 + 校验（参数与引用输入）+ 派生列 + 三个输出。"""
+    nodes = [
+        src_hero(), src_item(),
+        {"id": "join_reward_item", "type": "JOIN", "label": "奖励关联道具", "config": {
+            "joinType": "LEFT", "leftAlias": "reward", "rightAlias": "item",
+            "on": [{"left": "itemId", "right": "itemId"}], "expectedCardinality": "MANY_TO_ONE",
+            "conflictPolicy": {"mode": "EXPLICIT_THEN_PREFIX", "aliases": {"item.name": "itemName"}, "keyColumns": "MERGE"},
+            "select": ["reward.*", "item.name", "item.quality"],
+            "explosionGuard": {"maxOutputRows": 1000000, "maxAmplification": 1.0},
+            "unmatchedPolicy": "SIDE_OUTPUT"}},
+        {"id": "val_reward", "type": "VALIDATOR", "label": "奖励校验", "config": {
+            "params": {"total": "in_params"}, "refs": {"item": "in_ref_item"},
+            "rules": [
+                {"ruleId": "r1", "type": "NOT_NULL", "fields": ["itemId", "count"], "severity": "ERROR"},
+                {"ruleId": "r2", "type": "EXPR", "expr": "count > 0", "severity": "ERROR", "message": "奖励数量必须大于 0"},
+                {"ruleId": "r3", "type": "FOREIGN_KEY", "field": "itemId", "ref": {"input": "item", "field": "itemId"}, "severity": "ERROR"},
+                {"ruleId": "r4", "type": "UNIQUE", "fields": ["job", "level", "itemId"], "severity": "WARN"},
+                {"ruleId": "r5", "type": "RECONCILE", "detailAgg": "sum(count)",
+                 "summary": {"param": "total", "field": "totalCount"}, "tolerance": 0, "severity": "ERROR"},
+            ]}},
+        sink("sink_hp", "hero_base_hp", "cfg_hero_base_hp", ["job", "level"],
+             [("job", "job_name"), ("level", "lv"), ("baseHp", "base_hp")] + ([("hp", "hp")] if with_derive else [])),
+        sink("sink_reward", "level_reward", "cfg_level_reward", ["rewardId"],
+             [("rewardId", "id"), ("job", "job_name"), ("level", "lv"), ("itemId", "item_id"), ("count", "item_count"),
+              ("itemName", "item_name")]),
+        sink("sink_global", "global_switch", "cfg_global_switch", None,
+             [("maxOpenDays", "max_open_days"), ("doubleExp", "double_exp")]),
+    ]
+    edges = [
+        e("e2", "src_hero", "out_reward", "join_reward_item", "in_left"),
+        e("e3", "src_item", "out_item", "join_reward_item", "in_right"),
+        e("e4", "join_reward_item", "out_main", "val_reward", "in_main"),
+        e("e5", "src_hero", "out_total", "val_reward", "in_params"),
+        e("e8", "src_item", "out_item", "val_reward", "in_ref_item"),
+        e("e6", "val_reward", "out_pass", "sink_reward", "in"),
+        e("e7", "src_hero", "out_global", "sink_global", "in"),
+    ]
+    if with_derive:
+        nodes.append({"id": "derive_hp", "type": "DERIVE", "label": "血量系数", "config": {
+            "params": {"global": "in_params"},
+            "columns": [{"field": "hp", "expr": "int(double(baseHp) * params.global.hpRate)", "type": "int"}],
+            "onError": "ERROR"}})
+        edges += [e("e1", "src_hero", "out_hp", "derive_hp", "in"), e("e9", "src_hero", "out_global", "derive_hp", "in_params"),
+                  e("e10", "derive_hp", "out", "sink_hp", "in")]
+    else:
+        edges.append(e("e1", "src_hero", "out_hp", "sink_hp", "in"))
+    return {"dslVersion": "1.0", "pipelineCode": "hero_config", "nodes": nodes, "edges": edges}

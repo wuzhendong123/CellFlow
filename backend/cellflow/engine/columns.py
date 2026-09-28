@@ -57,6 +57,15 @@ def _match_header(source: str, headers: list[str]) -> str | None:
     return None
 
 
+def schema_type(spec: dict, declared: str | None = None) -> str:
+    """字段在下游看到的类型：枚举按映射后的值类型（整数或文本）。"""
+    t = parse_type(spec.get("type") or declared or "string")
+    if t.name == "enum":
+        vals = list((spec.get("enumMap") or {}).values())
+        return "long" if vals and all(isinstance(v, int) and not isinstance(v, bool) for v in vals) else "string"
+    return str(t)
+
+
 def bind_and_coerce(
     shape: ShapeResult,
     specs: list[dict],
@@ -97,11 +106,8 @@ def bind_and_coerce(
                 "headers": extra_with_data,
             }
         )
-    columns = [
-        ColumnSchema(spec["field"], str(parse_type(spec.get("type") or shape.declared_types.get(h or "", "") or "string")),
-                     bool(spec.get("isKey")), origin=h)
-        for spec, h in bound
-    ]
+    columns = [ColumnSchema(spec["field"], schema_type(spec, shape.declared_types.get(h or "")), bool(spec.get("isKey")),
+                            origin=h) for spec, h in bound]
     if new_columns == "INCLUDE_AS_STRING" and not shape.internal_headers:
         for h in extra_with_data:
             columns.append(ColumnSchema(re.sub(r"\W", "_", h), "string", origin=h))
@@ -110,7 +116,7 @@ def bind_and_coerce(
         columns.append(ColumnSchema("_block", "int", origin="_block"))
         bound.append(({"field": "_block", "type": "int"}, "_block"))
     idx = {h: i for i, h in enumerate(headers)}
-    types = [parse_type(c.type) for c in columns]
+    types = [parse_type(spec.get("type") or shape.declared_types.get(h or "") or "string") for spec, h in bound]
     out = Dataset(columns)
     dropped = 0
     for ri, row in enumerate(shape.rows):
