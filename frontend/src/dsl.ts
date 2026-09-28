@@ -172,7 +172,10 @@ export function parseA1(s: string): RangeJson | null {
 export const REGION_COLORS = ["#e6f4ff", "#f6ffed", "#fff7e6", "#f9f0ff", "#e6fffb", "#fff0f6", "#fcffe6", "#f0f5ff"];
 
 /** 连线合法性（WIREFRAME P3 画布交互）：源节点无输入、参数端口只接单行流、无环、单入边端口只接一条。 */
-export function canConnect(dsl: Dsl, src: string, srcPort: string, tgt: string, tgtPort: string, singleRow: (n: string, p: string) => boolean): string | null {
+/** 连线校验。opts.ignoreEdgeId：正在被拖动改接的那条线；opts.allowReplace：单连接端口已有连线时允许替换（调用方负责删掉旧线）。 */
+export function canConnect(dsl: Dsl, src: string, srcPort: string, tgt: string, tgtPort: string, singleRow: (n: string, p: string) => boolean,
+  opts: { ignoreEdgeId?: string; allowReplace?: boolean } = {}): string | null {
+  const edges = dsl.edges.filter((e) => e.id !== opts.ignoreEdgeId && !(opts.allowReplace && e.target.nodeId === tgt && e.target.portId === tgtPort));
   const t = dsl.nodes.find((n) => n.id === tgt);
   if (!t) return "目标节点不存在";
   if (t.type === "EXCEL_SOURCE") return "源节点没有输入端口";
@@ -180,7 +183,7 @@ export function canConnect(dsl: Dsl, src: string, srcPort: string, tgt: string, 
   const spec = inputPorts(t).find((p) => p.id === tgtPort);
   if (!spec) return "端口不存在";
   if (spec.kind === "PARAM" && !singleRow(src, srcPort)) return "参数端口只接受单行数据（如键值区、汇总区）";
-  if (!spec.multi && dsl.edges.some((e) => e.target.nodeId === tgt && e.target.portId === tgtPort)) return "该端口只能接一条线";
+  if (!spec.multi && edges.some((e) => e.target.nodeId === tgt && e.target.portId === tgtPort)) return "该端口只能接一条线";
   // 环检测：从 tgt 出发能否到达 src
   const stack = [tgt];
   const seen = new Set<string>();
@@ -189,7 +192,7 @@ export function canConnect(dsl: Dsl, src: string, srcPort: string, tgt: string, 
     if (n === src) return "连线会形成环";
     if (seen.has(n)) continue;
     seen.add(n);
-    dsl.edges.filter((e) => e.source.nodeId === n).forEach((e) => stack.push(e.target.nodeId));
+    edges.filter((e) => e.source.nodeId === n).forEach((e) => stack.push(e.target.nodeId));
   }
   return null;
 }

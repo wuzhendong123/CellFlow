@@ -1,6 +1,9 @@
 import {
-  addEdge,
   Background,
+  BaseEdge,
+  EdgeLabelRenderer,
+  EdgeProps,
+  getBezierPath,
   Connection,
   Controls,
   Edge,
@@ -153,6 +156,34 @@ function CfNode({ data, selected }: NodeProps<Node<NodeData>>) {
 
 const nodeTypes = { cf: CfNode };
 
+/** 连线：选中后高亮，并在中点显示删除按钮；两端可以拖到别的端口改接。 */
+function CfEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, selected, data }: EdgeProps) {
+  const [path, lx, ly] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition });
+  // 加宽的点击区域比连线短一截：两端各让出约 18px，露出改接用的拖动锚点
+  const inset = (pos: Position, x: number, y: number, d: number): [number, number] =>
+    pos === Position.Right ? [x + d, y] : pos === Position.Left ? [x - d, y] : pos === Position.Bottom ? [x, y + d] : [x, y - d];
+  const [sx, sy] = inset(sourcePosition, sourceX, sourceY, 18);
+  const [tx, ty] = inset(targetPosition, targetX, targetY, 18);
+  const [hitPath] = getBezierPath({ sourceX: sx, sourceY: sy, targetX: tx, targetY: ty, sourcePosition, targetPosition });
+  return (
+    <>
+      <BaseEdge id={id} path={path} style={style} interactionWidth={0} />
+      <path d={hitPath} fill="none" stroke="transparent" strokeWidth={16} className="react-flow__edge-interaction" />
+      {selected && (
+        <EdgeLabelRenderer>
+          <div className="nodrag nopan" style={{ position: "absolute", transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`, pointerEvents: "all" }}>
+            <Tooltip title="删除这条连线（也可按 Delete）">
+              <Button size="small" danger shape="circle" className="edge-delete" onClick={() => (data as any)?.onDelete?.(id)}>✕</Button>
+            </Tooltip>
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  );
+}
+
+const edgeTypes = { cf: CfEdge };
+
 interface Props {
   pipeline: any;
   reload: () => void;
@@ -188,6 +219,7 @@ function Inner({ pipeline, reload }: Props) {
   const [highlight, setHighlight] = useState<{ cell: string; nonce: number } | null>(null);
   const [job, setJob] = useState<any>(null);
   const [jobSig, setJobSig] = useState("");
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [configWidth, setConfigWidth] = useState<number>(() => {
     try { return Number(localStorage.getItem(CONFIG_WIDTH_KEY)) || CONFIG_WIDTH; } catch { return CONFIG_WIDTH; }
   });
@@ -313,6 +345,11 @@ function Inner({ pipeline, reload }: Props) {
     if (key === "until") runTest(true, undefined, id);
   }, []);
 
+  const deleteEdge = useCallback((id: string) => {
+    change({ ...dslRef.current, edges: dslRef.current.edges.filter((e) => e.id !== id) });
+    setSelectedEdge(null);
+  }, [change]);
+
   const rfNodes: Node<NodeData>[] = dsl.nodes.map((n, i) => ({
     id: n.id,
     type: "cf",
@@ -327,26 +364,34 @@ function Inner({ pipeline, reload }: Props) {
     const s = dsl.nodes.find((n) => n.id === e.source.nodeId);
     const side = s ? outputPorts(s).find((p) => p.id === e.source.portId)?.side : false;
     const rejected = job?.metrics?.nodes?.[e.source.nodeId]?.rows?.[e.source.portId.replace("out_pass", "out_reject").replace("out_main", "out_unmatched").replace(/^out$/, "out_reject")] > 0;
+    const sel = e.id === selectedEdge;
     return {
-      id: e.id, source: e.source.nodeId, sourceHandle: e.source.portId, target: e.target.nodeId, targetHandle: e.target.portId,
-      style: { stroke: side || rejected ? "#fa8c16" : "#999", strokeDasharray: kind !== "DATA" ? "5 4" : undefined },
+      id: e.id, type: "cf", source: e.source.nodeId, sourceHandle: e.source.portId, target: e.target.nodeId, targetHandle: e.target.portId,
+      selected: sel, data: { onDelete: deleteEdge },
+      style: { stroke: sel ? "#1677ff" : side || rejected ? "#fa8c16" : "#999", strokeWidth: sel ? 2.5 : 1.5, strokeDasharray: kind !== "DATA" ? "5 4" : undefined },
     };
   });
 
   const singleRow = (n: string, p: string) => !!analysis?.ports?.[n]?.[p]?.singleRow;
-  const isValid = (c: Connection | Edge) => {
-    const why = canConnect(dsl, c.source!, c.sourceHandle!, c.target!, c.targetHandle!, singleRow);
-    return why === null;
-  };
+  // 拖动改接时记住正在移动的线，校验时忽略它；单连接端口允许直接替换原来的线
+  const reconnecting = useRef<string | null>(null);
+  const isValid = (c: Connection | Edge) =>
+    canConnect(dsl, c.source!, c.sourceHandle!, c.target!, c.targetHandle!, singleRow, { ignoreEdgeId: reconnecting.current || undefined, allowReplace: true }) === null;
 
-  const onConnect = (c: Connection) => {
-    const why = canConnect(dsl, c.source, c.sourceHandle!, c.target, c.targetHandle!, singleRow);
+  /** 把连线接到 c；oldId 为改接的旧线。单连接端口上已有的线会被替换。 */
+  const connect = (c: Connection, oldId?: string) => {
+    const why = canConnect(dsl, c.source, c.sourceHandle!, c.target, c.targetHandle!, singleRow, { ignoreEdgeId: oldId, allowReplace: true });
     if (why) { message.warning(why); return; }
-    const id = newId("e", dsl.edges.map((e) => e.id));
-    const added = addEdge({ ...c, id }, []);
-    void added;
-    change({ ...dsl, edges: [...dsl.edges, { id, source: { nodeId: c.source, portId: c.sourceHandle! }, target: { nodeId: c.target, portId: c.targetHandle! } }] });
+    const t = dsl.nodes.find((n) => n.id === c.target);
+    const multi = t ? inputPorts(t).find((p) => p.id === c.targetHandle)?.multi : false;
+    const replaced = multi ? [] : dsl.edges.filter((e) => e.id !== oldId && e.target.nodeId === c.target && e.target.portId === c.targetHandle);
+    const keep = dsl.edges.filter((e) => e.id !== oldId && !replaced.includes(e));
+    const id = oldId || newId("e", dsl.edges.map((e) => e.id));
+    change({ ...dsl, edges: [...keep, { id, source: { nodeId: c.source, portId: c.sourceHandle! }, target: { nodeId: c.target, portId: c.targetHandle! } }] });
+    if (replaced.length) message.info("该端口只能接一条线，已替换原来的连线");
+    setSelectedEdge(null);
   };
+  const onConnect = (c: Connection) => connect(c);
 
   const addNode = (t: NodeType, pos?: { x: number; y: number }) => {
     const cur = dslRef.current;
@@ -484,10 +529,20 @@ function Inner({ pipeline, reload }: Props) {
           if (sel) setSelected(sel.id);
         }}
         onNodesDelete={(ns) => { const ids = new Set(ns.map((n) => n.id)); change({ nodes: dsl.nodes.filter((n) => !ids.has(n.id)), edges: dsl.edges.filter((e) => !ids.has(e.source.nodeId) && !ids.has(e.target.nodeId)) }); }}
-        onEdgesDelete={(es) => { const ids = new Set(es.map((e) => e.id)); change({ ...dsl, edges: dsl.edges.filter((e) => !ids.has(e.id)) }); }}
+        onEdgesDelete={(es) => { const ids = new Set(es.map((e) => e.id)); change({ ...dsl, edges: dsl.edges.filter((e) => !ids.has(e.id)) }); setSelectedEdge(null); }}
+        onEdgesChange={(chs) => {
+          const s1 = chs.find((c: any) => c.type === "select") as any;
+          if (s1) setSelectedEdge(s1.selected ? s1.id : null);
+        }}
+        onEdgeClick={(_, e) => { setSelectedEdge(e.id); setSelected(null); }}
         onConnect={onConnect} isValidConnection={isValid}
+        edgesReconnectable reconnectRadius={14}
+        onReconnectStart={(_, e) => { reconnecting.current = e.id; }}
+        onReconnect={(old, c) => connect(c, old.id)}
+        onReconnectEnd={() => { reconnecting.current = null; }}
+        edgeTypes={edgeTypes}
         onNodeDoubleClick={(_, n) => { const d = dsl.nodes.find((x) => x.id === n.id); if (d?.type === "EXCEL_SOURCE") openSplit(n.id); }}
-        onPaneClick={() => setSelected(null)}
+        onPaneClick={() => { setSelected(null); setSelectedEdge(null); }}
         deleteKeyCode={["Delete", "Backspace"]} panOnScroll selectionOnDrag={false} panActivationKeyCode="Space">
         <Background />
         <Controls />

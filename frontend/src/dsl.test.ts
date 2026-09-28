@@ -35,3 +35,11 @@ describe("dsl", () => {
     expect(canConnect(cyc, "v", "out_pass", "d", "in_params", () => true)).toBe("连线会形成环");
   });
 });
+
+describe("reconnect / replace", () => {
+  it("单连接端口：默认拒绝，允许替换时通过；改接时忽略正在移动的线", () => {
+    expect(canConnect(dsl, "src", "out_kv", "d", "in", single)).toBe("该端口只能接一条线");
+    expect(canConnect(dsl, "src", "out_kv", "d", "in", single, { allowReplace: true })).toBeNull();
+    expect(canConnect(dsl, "src", "out_kv", "d", "in", single, { ignoreEdgeId: "e1" })).toBeNull();
+  });
+});
