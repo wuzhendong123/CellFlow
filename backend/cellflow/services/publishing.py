@@ -7,6 +7,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, func, select, text
@@ -63,7 +64,7 @@ def save_snapshot(job_id: int | None, td: TableData, full_columns: list[str] | N
         h = writer.row_hash(r, td.columns)
         hashes.append(h)
         key = [writer.norm_value(r.get(k)) for k in td.key_columns] if td.key_columns else None
-        lines.append(json.dumps({"k": key, "h": h, "r": to_jsonable(r), "c": c or {}}, ensure_ascii=False, default=str))
+        lines.append(json.dumps({"k": key, "h": h, "r": _snapshot_row(r), "c": c or {}}, ensure_ascii=False, default=str))
     content = __import__("hashlib").sha256("\n".join(sorted(hashes)).encode()).hexdigest()
     key = f"snapshots/{job_id or 'baseline'}/{td.dataset}-{content[:12]}.jsonl.gz"
     get_storage().put(key, gzip.compress("\n".join(lines).encode()))
@@ -75,11 +76,21 @@ def save_snapshot(job_id: int | None, td: TableData, full_columns: list[str] | N
         )).inserted_primary_key[0]
 
 
-def load_snapshot(snapshot_id: int) -> tuple[dict, list[dict]]:
+def _snapshot_row(r: dict) -> dict:
+    """decimal 按比对口径归一化后存（1.50 → "1.5"、10 → 10），保证快照读回后与原值比对一致（否则会被误判为修改）。"""
+    return {k: writer.norm_value(v) if isinstance(v, Decimal) else to_jsonable(v) for k, v in r.items()}
+
+
+def snapshot_meta(snapshot_id: int) -> dict:
     with get_engine().connect() as c:
         s = c.execute(select(snapshot).where(snapshot.c.id == snapshot_id)).mappings().first()
     if not s:
         raise CFError("SNAPSHOT_NOT_FOUND", "快照不存在或已超过保留期", 404)
+    return dict(s)
+
+
+def load_snapshot(snapshot_id: int) -> tuple[dict, list[dict]]:
+    s = snapshot_meta(snapshot_id)
     st = get_storage()
     if not st.exists(s["storage_uri"]):
         raise CFError("SNAPSHOT_EXPIRED", "快照已超过保留期", 410)
@@ -121,6 +132,15 @@ def summary(changes: list[dict]) -> dict:
     return {"c": c.get("c", 0), "u": c.get("u", 0), "d": c.get("d", 0)}
 
 
+def comparable(rows: list[dict], meta: dict | None, columns: list[str], key_columns: list[str] | None) -> list[dict]:
+    """快照行自带按比对列计算的 k/h：比对列与主键都一致时直接复用，省去逐行重算哈希；否则重新投影。"""
+    sj = (meta or {}).get("schema_json") or {}
+    hashed = sj.get("compareColumns") or sj.get("columns")
+    if meta and hashed == list(columns) and (meta.get("key_fields") or None) == (list(key_columns) if key_columns else None):
+        return rows
+    return project(rows, columns, key_columns)
+
+
 def project(rows: list[dict], columns: list[str], key_columns: list[str] | None) -> list[dict]:
     """把基线快照（全列）投影到本次写入的列上再比对。"""
     out = []
@@ -135,9 +155,14 @@ def project(rows: list[dict], columns: list[str], key_columns: list[str] | None)
 def live_release(pipeline_id: int) -> dict | None:
     with get_engine().connect() as c:
         rid = c.execute(select(live_state.c.release_id).where(live_state.c.pipeline_id == pipeline_id)).scalar()
-        if not rid:
-            return None
+    return release_with_snapshots(rid) if rid else None
+
+
+def release_with_snapshots(rid: int) -> dict | None:
+    with get_engine().connect() as c:
         r = c.execute(select(release).where(release.c.id == rid)).mappings().first()
+        if not r:
+            return None
         snaps = {x["dataset"]: dict(x) for x in c.execute(select(release_snapshot).where(release_snapshot.c.release_id == rid)).mappings()}
     out = dict(r)
     out["snapshots"] = snaps
@@ -329,7 +354,7 @@ def current_rows(ds_id: int, live: dict | None, td: TableData) -> tuple[list[dic
     """线上内容（投影到本次写入的列）：有发布记录取快照，否则取业务表当前内容。"""
     if live:
         raw, meta = live_rows_for(live, td.dataset, td.table)
-        return project(raw, td.columns, td.key_columns), meta
+        return comparable(raw, meta, td.columns, td.key_columns), meta
     return baseline_rows(ds_id, td), None
 
 

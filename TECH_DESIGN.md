@@ -302,6 +302,7 @@ CREATE TABLE cf_parse_job (
   callback_url      VARCHAR(512),
   error_summary     JSON,                              -- {error: n, warn: n, guard: "..."}
   metrics           JSON,                              -- 每节点行数、耗时、定位报告
+  result            JSON,                              -- 结果摘要：各表变更数、安全闸结果、只校验/试跑的变更预判（实现时增补）
   release_id        BIGINT,
   submitted_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   started_at        DATETIME(3),
@@ -329,7 +330,7 @@ CREATE TABLE cf_job_issue (
 
 CREATE TABLE cf_snapshot (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
-  job_id            BIGINT       NOT NULL,
+  job_id            BIGINT,                            -- 接管基线快照没有任务，为空（实现时改为可空）
   dataset           VARCHAR(128) NOT NULL,
   storage_uri       VARCHAR(512) NOT NULL,             -- jsonl.gz / parquet，含每行 row_hash
   schema_json       JSON         NOT NULL,
@@ -384,6 +385,7 @@ CREATE TABLE cf_outbox (
   status            VARCHAR(16)  NOT NULL DEFAULT 'PENDING',
   attempts          INT          NOT NULL DEFAULT 0,
   next_retry_at     DATETIME(3),
+  last_error        VARCHAR(512),                      -- 最近一次投递失败原因（实现时增补）
   KEY idx_status (status, next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

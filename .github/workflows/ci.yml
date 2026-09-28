@@ -38,3 +38,30 @@ jobs:
         with:
           node-version: "22"
       - run: if [ -f package.json ]; then npm ci && npm run lint && npm run build && npm test; fi
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci_only_root
+        ports: ["3306:3306"]
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -pci_only_root" --health-interval=5s --health-retries=20
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      CF_E2E_MYSQL_URL: mysql+pymysql://root:ci_only_root@127.0.0.1:3306
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: sudo apt-get install -y redis-tools
+      - run: pip install -e "./backend[dev]" cryptography
+      - run: cd frontend && npm ci && npx playwright install --with-deps chromium
+      - run: cd frontend && ./e2e/run.sh

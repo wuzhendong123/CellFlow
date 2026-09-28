@@ -230,7 +230,7 @@ def execute(dsl: dict, wb: Workbook, settings: dict, sample_rows: int | None = N
         n = nodes[nid]
         t0 = time.perf_counter()
         if n["type"] == "EXCEL_SOURCE":
-            sr = run_source(n.get("config") or {}, wb, nid)
+            sr = run_source(n.get("config") or {}, wb, nid, sample_rows, {p for (x, p) in no_sample if x == nid})
             res.issues += sr.issues
             res.locate_report += [dict(r, node=nid) for r in sr.locate_report]
             for port, ds in sr.outputs.items():

@@ -191,6 +191,9 @@ def _scan_sheet_xml(raw: bytes) -> _SheetXmlInfo:
     return info
 
 
+MAX_UNCOMPRESSED_BYTES = 512 * 2**20
+
+
 class Workbook:
     """一个上传文件：按需加载 Sheet 网格（只读流式），同一 Sheet 只加载一次。"""
 
@@ -201,12 +204,22 @@ class Workbook:
             warnings.simplefilter("ignore")
             try:
                 self._zip = zipfile.ZipFile(io.BytesIO(data))
+                self._check_zip_bomb()
                 self._wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True, keep_vba=False)
+            except WorkbookError:
+                raise
             except Exception as exc:
                 raise WorkbookError("FILE_UNSUPPORTED", f"无法读取文件，请确认是 xlsx 格式：{type(exc).__name__}") from exc
         self.date1904 = bool(getattr(self._wb, "epoch", None) and self._wb.epoch.year == 1904)
         self._states = self._sheet_states()
         self._cache: dict[tuple[str, str], SheetGrid] = {}
+
+    def _check_zip_bomb(self) -> None:
+        """解压炸弹防护：按 zip 目录声明的解压后大小判断（zipfile 读取时不会超过声明的大小）。
+        正常 xlsx 压缩比约 5~10 倍，上限按 20MB 文件 × 25 倍留足余量。"""
+        total = sum(i.file_size for i in self._zip.infolist())
+        if total > MAX_UNCOMPRESSED_BYTES:
+            raise WorkbookError("FILE_TOO_LARGE", f"文件解压后超过 {MAX_UNCOMPRESSED_BYTES // 2**20}MB，疑似异常文件")
 
     def _sheet_states(self) -> dict[str, str]:
         try:

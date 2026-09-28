@@ -12,3 +12,5 @@ backend/tests/fixtures/generated/
 dump.rdb
 *.xlsx
 !backend/tests/**/*.xlsx
+frontend/e2e/.data/
+frontend/e2e/.results/

@@ -459,3 +459,44 @@ def test_f14_7_cleanup_keeps_live_and_baseline(client, biz):
     assert expired
     r = client.post(f"/api/pipelines/{pid}/rollback/preview", json={"targetReleaseId": expired[0]["id"]})
     assert r.status_code == 410
+
+
+def test_decimal_values_stable_across_snapshots(client, biz):
+    """decimal 列（如 1.50、10）经快照存取后比对不应被当成修改：同一文件再次提交为无变化。"""
+    from test_perf import big_file, perf_dsl
+
+    with biz.begin() as c:
+        c.execute(text("""CREATE TABLE perf_items (id BIGINT PRIMARY KEY, name VARCHAR(64) NOT NULL, lv INT, cnt INT,
+                          price DECIMAL(12,2), total DOUBLE) CHARSET=utf8mb4"""))
+    data = big_file(rows=30)
+    env = setup_pipeline(client, dsl=perf_dsl(), data=data)
+    assert job(client, submit(client, env["app"], data).json()["data"]["jobId"])["status"] == "PUBLISHED"
+    j = job(client, submit(client, env["app"], data).json()["data"]["jobId"])
+    assert j["status"] == "NO_CHANGE", j["result"]
+
+
+def test_open_api_security_boundaries(client, biz):
+    """签名时间窗、错误密钥、调用方之间的任务隔离。"""
+    import time as _t
+    import uuid as _u
+
+    from cellflow.services.auth import sign
+
+    env = setup_pipeline(client)
+    app = env["app"]
+    path = "/open/v1/pipelines/hero_config"
+
+    def call(ts, secret="test-app-secret", key=app["appKey"], p=path):
+        nonce = _u.uuid4().hex
+        return client.get(p, headers={"X-CF-AppKey": key, "X-CF-Timestamp": str(ts), "X-CF-Nonce": nonce,
+                                      "X-CF-Signature": sign(secret, "GET", p, str(ts), nonce, b"")})
+
+    now = int(_t.time())
+    assert call(now).status_code == 200
+    assert call(now - 3600).status_code == 401  # 过期的时间戳即使签名正确也拒绝
+    assert call(now, secret="wrong-secret").status_code == 401
+    jid = submit(client, app, fixtures.hero_config()).json()["data"]["jobId"]
+    other = okd(client.post("/api/client-apps", json={"name": "业务服务B", "secretRef": "test_app_secret",
+                                                      "allowedPipelines": ["hero_config"]}, headers=OP))
+    assert call(now, key=other["appKey"], p=f"/open/v1/jobs/{jid}").status_code == 404  # 看不到别的调用方的任务
+    assert call(now, p=f"/open/v1/jobs/{jid}").status_code == 200

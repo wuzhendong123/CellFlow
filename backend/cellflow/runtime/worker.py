@@ -19,6 +19,12 @@ async def run_job(ctx, job_id: int) -> str:
     return await asyncio.to_thread(_run, job_id)
 
 
+async def release_changes(ctx, release_id: int) -> None:
+    from cellflow.runtime.executor import fill_release_changes
+
+    await asyncio.to_thread(fill_release_changes, release_id)
+
+
 async def deliver_callbacks(ctx) -> int:
     from cellflow.services.callbacks import deliver_due
 
@@ -42,7 +48,7 @@ async def startup(ctx) -> None:
 
 
 class WorkerSettings:
-    functions = [run_job]
+    functions = [run_job, release_changes]
     cron_jobs = [
         cron(deliver_callbacks, second={0, 10, 20, 30, 40, 50}),
         cron(recover, minute=set(range(0, 60, 5)), second=5),

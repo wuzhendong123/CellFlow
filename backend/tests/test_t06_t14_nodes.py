@@ -328,3 +328,51 @@ def test_duplicate_primary_key_in_sink():
     r = run(d.hero_dsl(), fixtures.hero_config(reward_overrides={1002: (1001, "战士", 2, 5002, 20)}))
     e = errs(r, "DUPLICATE_KEY")
     assert e and len(e[0]["related"]) == 2
+
+
+def test_expr_result_type_for_native_arithmetic():
+    """cel-python 的 double * double 返回 Python float，结果类型仍应推断为 float（而非 string）。"""
+    from cellflow.engine.expr import FieldInfo, compile_expr
+
+    f = {"price": FieldInfo("decimal"), "cnt": FieldInfo("int")}
+    assert compile_expr("double(price) * double(cnt)", f).result_type == "float"
+    assert compile_expr("cnt * 2", f).result_type == "long"
+    assert compile_expr("double(cnt) + 1.0 > 2.0", f).result_type == "bool"
+
+
+def test_expr_compiled_runner_matches_interpreter_and_is_thread_safe():
+    """转译执行与解释执行结果一致；不能转译的表达式回退；多线程并发求值互不串行。"""
+    import threading
+
+    import celpy
+
+    from cellflow.engine import expr as E
+
+    f = {"a": E.FieldInfo("int"), "b": E.FieldInfo("float"), "s": E.FieldInfo("string")}
+    exprs = ["a * 2 + 1", "double(a) / b", "s.startsWith('x') ? a : -a", "size(s) > 2 && b >= 1.5", "string(a) + s",
+             "coalesce(s, 'n')", "a % 3 == 0 ? 'fizz' : s"]
+    rows = [{"a": i, "b": 1.5 + i, "s": f"x{i}" if i % 2 else f"y{i}"} for i in range(40)]
+    for x in exprs:
+        p = E.compile_expr(x, f)
+        interp = E.celpy.InterpretedRunner(E._ENV, E._ENV.compile(x), E._FUNCS)
+        for r in rows:
+            assert p.evaluate(r) == E.from_cel(interp.evaluate({k: E.to_cel(v) for k, v in r.items()})), (x, r)
+    assert E.compile_expr("coalesce(s, 'n')", f).prog.compiled is False
+    with __import__("pytest").raises(E.ExprError, match="除数为 0"):
+        E.compile_expr("a / (a - a)", f).evaluate({"a": 3})
+    assert isinstance(celpy.CELEvalError, type)
+
+    p = E.compile_expr("a * 10 + 1", f)
+    errors = []
+
+    def work(base):
+        for i in range(base, base + 300):
+            if p.evaluate({"a": i}) != i * 10 + 1:
+                errors.append(i)
+
+    ts = [threading.Thread(target=work, args=(k * 1000,)) for k in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors

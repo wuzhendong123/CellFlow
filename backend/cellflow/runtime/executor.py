@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import and_, func, select
@@ -228,21 +229,76 @@ def rollback_targets(pipeline_id: int) -> list[dict]:
                                            .order_by(release.c.id.desc())).mappings()]
 
 
-def _target_tds(target_id: int) -> list[pub.TableData]:
+def _target_tds(target_id: int, with_rows: bool = True) -> list[pub.TableData]:
+    """回滚目标版本的各表数据；with_rows=False 时只读快照元数据（结构检查用，不读对象存储）。"""
     with get_engine().connect() as c:
         rs = c.execute(select(release_snapshot).where(release_snapshot.c.release_id == target_id)).mappings().all()
     if not rs:
         raise CFError("SNAPSHOT_EXPIRED", "目标版本没有可用快照", 410)
     tds = []
     for r in rs:
-        meta, rows = pub.load_snapshot(r["snapshot_id"])
+        if with_rows:
+            meta, rows = pub.load_snapshot(r["snapshot_id"])
+        else:
+            meta, rows = pub.snapshot_meta(r["snapshot_id"]), []
         cols = meta["schema_json"].get("columns") or []
         b = meta["schema_json"].get("binding") or {}
         td = pub.TableData(r["dataset"], r["table_name"], cols, meta["key_fields"], [x["r"] for x in rows],
                            [x.get("c") or {} for x in rows], b)
         td.compare_columns = meta["schema_json"].get("compareColumns") or cols  # type: ignore[attr-defined]
+        td.snapshot_rows, td.snapshot_meta = rows, meta  # type: ignore[attr-defined]
         tds.append(td)
     return tds
+
+
+def _rollback_checks(p: dict, live: dict, target_id: int, tds: list[pub.TableData]) -> dict:
+    """回滚前置检查：执行方式、目标表结构兼容、外部改动（只需元数据与校验和，不做逐行比对）。"""
+    eng = datasources.engine_for(p["datasource_id"])
+    fast = writer.backups_exist(eng, [td.table for td in tds], target_id)
+    tables = []
+    for td in tds:
+        desc = datasources.describe_table(p["datasource_id"], td.table)
+        cols = {c["name"]: c for c in desc["columns"]}
+        problems = [f"目标表已没有列「{c}」" for c in td.columns if c not in cols]
+        problems += [f"列「{c['name']}」不可为空且没有默认值，但目标版本没有该列的数据" for c in desc["columns"]
+                     if c["name"] not in td.columns and not c["nullable"] and not c["hasDefault"]]
+        drift = False
+        if (live.get("table_checksums") or {}).get(td.table) is not None:
+            with eng.connect() as c:
+                drift = writer.checksum(c, td.table) != live["table_checksums"][td.table]
+        tables.append({"dataset": td.dataset, "table": td.table, "schemaProblems": problems, "drift": drift})
+    return {"liveReleaseId": live["id"], "targetReleaseId": target_id, "mode": "FAST_SWAP" if fast else "REWRITE",
+            "tables": tables, "compatible": not any(t["schemaProblems"] for t in tables),
+            "drift": any(t["drift"] for t in tables)}
+
+
+def _rollback_changes(live: dict, target_id: int) -> tuple[list[pub.TableData], dict]:
+    """线上 → 目标版本的逐行变更（两边都是快照，复用快照里的行哈希）。"""
+    tds = _target_tds(target_id)
+    per_table = {}
+    for td in tds:
+        live_raw, live_meta = pub.live_rows_for(live, td.dataset, td.table)
+        cmp = getattr(td, "compare_columns", td.columns)
+        key = td.key_columns
+        old = pub.comparable(live_raw, live_meta, cmp, key)
+        new = pub.comparable(td.snapshot_rows, td.snapshot_meta, cmp, key)  # type: ignore[attr-defined]
+        per_table[td.dataset] = (td.table, pub.diff_rows(old, new, cmp, key))
+    return tds, per_table
+
+
+def fill_release_changes(release_id: int) -> None:
+    """补算快路径回滚的变更明细：上一个线上发布 → 回滚目标。"""
+    r = pub.release_with_snapshots(release_id)
+    if not r or r["change_uri"] or not r["rollback_to"] or not r["prev_release_id"]:
+        return
+    prev = pub.release_with_snapshots(r["prev_release_id"])
+    if not prev:
+        return
+    _, per_table = _rollback_changes(prev, r["rollback_to"])
+    with get_engine().begin() as c:
+        c.execute(release.update().where(release.c.id == release_id).values(
+            change_summary={ds: pub.summary(ch) for ds, (_, ch) in per_table.items()},
+            change_uri=pub.save_changes(release_id, per_table)))
 
 
 def rollback_preview(pipeline_id: int, target_id: int) -> dict:
@@ -253,31 +309,11 @@ def rollback_preview(pipeline_id: int, target_id: int) -> dict:
     target = _release(target_id, pipeline_id)
     if target["id"] == live["id"]:
         raise CFError("INVALID_REQUEST", "目标版本就是当前线上版本", 400)
-    tds = _target_tds(target_id)
-    eng = datasources.engine_for(p["datasource_id"])
-    tables = []
-    fast = writer.backups_exist(eng, [td.table for td in tds], target_id)
-    for td in tds:
-        live_raw, _ = pub.live_rows_for(live, td.dataset, td.table)
-        cmp = getattr(td, "compare_columns", td.columns)
-        key = td.key_columns
-        old = pub.project(live_raw, cmp, key)
-        new = pub.project([{"r": r} for r in td.rows], cmp, key)
-        changes = pub.diff_rows(old, new, cmp, key)
-        desc = datasources.describe_table(p["datasource_id"], td.table)
-        cols = {c["name"]: c for c in desc["columns"]}
-        problems = [f"目标表已没有列「{c}」" for c in td.columns if c not in cols]
-        problems += [f"列「{c['name']}」不可为空且没有默认值，但目标版本没有该列的数据" for c in desc["columns"]
-                     if c["name"] not in td.columns and not c["nullable"] and not c["hasDefault"]]
-        drift = False
-        if (live.get("table_checksums") or {}).get(td.table) is not None:
-            with eng.connect() as c:
-                drift = writer.checksum(c, td.table) != live["table_checksums"][td.table]
-        tables.append({"dataset": td.dataset, "table": td.table, "changes": pub.summary(changes), "schemaProblems": problems,
-                       "drift": drift})
-    return {"liveReleaseId": live["id"], "targetReleaseId": target_id, "mode": "FAST_SWAP" if fast else "REWRITE",
-            "tables": tables, "compatible": not any(t["schemaProblems"] for t in tables),
-            "drift": any(t["drift"] for t in tables)}
+    pre = _rollback_checks(p, live, target_id, _target_tds(target_id, with_rows=False))
+    _, per_table = _rollback_changes(live, target_id)
+    for t in pre["tables"]:
+        t["changes"] = pub.summary(per_table[t["dataset"]][1])
+    return pre
 
 
 def _release(rid: int, pipeline_id: int) -> dict:
@@ -300,7 +336,10 @@ def rollback(pipeline_id: int, target_id: int, expected_live_id: int, operator: 
             live = pub.live_release(pipeline_id)
             if not live or live["id"] != expected_live_id:
                 raise CFError("LIVE_STATE_CONFLICT", "线上版本已变化，请刷新后再试", 409)
-            pre = rollback_preview(pipeline_id, target_id)
+            target = _release(target_id, pipeline_id)
+            if target["id"] == live["id"]:
+                raise CFError("INVALID_REQUEST", "目标版本就是当前线上版本", 400)
+            pre = _rollback_checks(p, live, target_id, _target_tds(target_id, with_rows=False))
             if not pre["compatible"]:
                 raise CFError("TARGET_SCHEMA_MISMATCH", "目标版本与当前表结构不兼容", 409, pre)
             if pre["drift"] and not confirm_drift:
@@ -308,42 +347,40 @@ def rollback(pipeline_id: int, target_id: int, expected_live_id: int, operator: 
             if freeze:
                 with get_engine().begin() as c:
                     c.execute(pipeline.update().where(pipeline.c.id == pipeline_id).values(frozen=1))
-            tds = _target_tds(target_id)
             eng = datasources.engine_for(p["datasource_id"])
             s = settings.get_all()
-            per_table = {}
-            for td in tds:
-                live_raw, _ = pub.live_rows_for(live, td.dataset, td.table)
-                cmp = getattr(td, "compare_columns", td.columns)
-                per_table[td.dataset] = (td.table, pub.diff_rows(pub.project(live_raw, cmp, td.key_columns),
-                                                                 pub.project([{"r": r} for r in td.rows], cmp, td.key_columns),
-                                                                 cmp, td.key_columns))
             with get_engine().connect() as c:
-                snap_ids = {r["dataset"]: r["snapshot_id"] for r in c.execute(select(release_snapshot).where(
+                snaps = {r["dataset"]: (r["snapshot_id"], r["table_name"]) for r in c.execute(select(release_snapshot).where(
                     release_snapshot.c.release_id == target_id)).mappings()}
             if pre["mode"] == "FAST_SWAP":
+                # 快路径（F14-1 秒级）：先互换备份表并切换线上指针，再补算变更明细
+                tables = [t for _, t in snaps.values()]
                 with get_engine().begin() as c:
                     rid = pub.create_release(c, pipeline_id=pipeline_id, kind="ROLLBACK", status="WRITING", rollback_to=target_id,
                                              prev_release_id=live["id"], write_plan={"tables": [], "fastSwap": True},
-                                             change_summary={ds: pub.summary(ch) for ds, (_, ch) in per_table.items()},
-                                             operator=operator, reason=reason)
-                    for td in tds:
-                        c.execute(release_snapshot.insert().values(release_id=rid, dataset=td.dataset,
-                                                                   snapshot_id=snap_ids[td.dataset], table_name=td.table))
+                                             change_summary={}, operator=operator, reason=reason)
+                    for ds, (sid, t) in snaps.items():
+                        c.execute(release_snapshot.insert().values(release_id=rid, dataset=ds, snapshot_id=sid, table_name=t))
                 try:
-                    checksums = writer.swap_back(eng, [td.table for td in tds], live["id"], target_id,
+                    checksums = writer.swap_back(eng, tables, live["id"], target_id,
                                                  s["write.lockWaitTimeoutSec"], s["write.renameRetries"])
                 except writer.WriteError as e:
                     with get_engine().begin() as c:
                         c.execute(release.update().where(release.c.id == rid).values(status="FAILED"))
                     raise CFError(e.code, e.message, 500) from e
                 with get_engine().begin() as c:
-                    pub.finish_release(c, rid, status="PUBLISHED", table_checksums=checksums,
-                                       change_uri=pub.save_changes(rid, per_table))
+                    pub.finish_release(c, rid, status="PUBLISHED", table_checksums=checksums)
                     pub.set_live(c, pipeline_id, rid, live["id"])
+                from cellflow.runtime.queue import dispatch_release_changes
+
+                try:
+                    dispatch_release_changes(rid)
+                except Exception:  # noqa: BLE001 — 业务表已切换成功，变更明细补算失败不影响回滚结果
+                    logging.getLogger(__name__).exception("回滚 #%s 的变更明细补算未能排队", rid)
             else:
-                rid = write_release(p, tds, snap_ids, per_table, live, kind="ROLLBACK", operator=operator, reason=reason,
-                                    job_id=None, rollback_to=target_id)
+                tds, per_table = _rollback_changes(live, target_id)
+                rid = write_release(p, tds, {ds: sid for ds, (sid, _) in snaps.items()}, per_table, live, kind="ROLLBACK",
+                                    operator=operator, reason=reason, job_id=None, rollback_to=target_id)
             with get_engine().begin() as c:
                 audit.record(c, operator, ip, "ROLLBACK", f"pipeline:{p['code']}",
                              {"from": live["id"], "to": target_id, "releaseId": rid, "mode": pre["mode"], "freeze": freeze}, reason)

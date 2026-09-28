@@ -21,13 +21,27 @@ def dispatch(job_id: int) -> None:
 
         deliver_due()
         return
+    _enqueue("run_job", job_id, key=f"cf-job-{job_id}")
+
+
+def dispatch_release_changes(release_id: int) -> None:
+    """快路径回滚后补算变更明细（不阻塞回滚请求）。"""
+    if inline():
+        from cellflow.runtime.executor import fill_release_changes
+
+        fill_release_changes(release_id)
+        return
+    _enqueue("release_changes", release_id, key=f"cf-changes-{release_id}")
+
+
+def _enqueue(function: str, *args, key: str) -> None:
     from arq import create_pool
     from arq.connections import RedisSettings
 
-    async def _enqueue():
+    async def _run():
         pool = await create_pool(RedisSettings.from_dsn(get_settings().redis_url))
         try:
-            await pool.enqueue_job("run_job", job_id, _job_id=f"cf-job-{job_id}")
+            await pool.enqueue_job(function, *args, _job_id=key)
         finally:
             await pool.aclose()
 
@@ -36,6 +50,6 @@ def dispatch(job_id: int) -> None:
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
-        loop.create_task(_enqueue())
+        loop.create_task(_run())
     else:
-        asyncio.run(_enqueue())
+        asyncio.run(_run())

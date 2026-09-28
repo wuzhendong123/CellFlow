@@ -209,7 +209,14 @@ def norm_value(v: Any) -> Any:
     if isinstance(v, (int,)):
         return v
     if isinstance(v, float):
-        d = Decimal(repr(v)).normalize()
+        # 快路径（与下方 Decimal 归一化结果一致）：整数值转 int；无指数的 repr 本身就是最短且无尾随 0 的写法
+        r = repr(v)
+        if v.is_integer():
+            if -1e15 < v < 1e15:
+                return int(v)
+        elif "e" not in r and "n" not in r:
+            return r
+        d = Decimal(r).normalize()
         return int(d) if d == d.to_integral_value() else format(d, "f")
     if isinstance(v, Decimal):
         d = v.normalize()

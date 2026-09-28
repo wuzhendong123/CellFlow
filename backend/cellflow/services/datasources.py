@@ -11,6 +11,7 @@ from cellflow.engine.types import parse_type
 from cellflow.errors import CFError, not_found
 from cellflow.meta.db import get_engine
 from cellflow.meta.tables import datasource, pipeline, table_owner
+from cellflow.runtime import writer
 
 INTERNAL_TABLE_MARKERS = ("__cfs_", "__cfb_")
 MARKER_TABLE = "_cellflow_marker"
@@ -158,7 +159,7 @@ def describe_table(ds_id: int, table: str) -> dict:
         own_fks = [r[0] for r in c.execute(text(
             "SELECT DISTINCT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
             "WHERE TABLE_SCHEMA=:s AND TABLE_NAME=:t AND REFERENCED_TABLE_NAME IS NOT NULL"), {"s": s, "t": table}).all()]
-        rows = c.execute(text(f"SELECT COUNT(*) FROM `{table}`")).scalar()
+        rows = c.execute(text(f"SELECT COUNT(*) FROM {writer.q(table)}")).scalar()
     indexes: dict[str, dict] = {}
     for name, non_unique, col in idx:
         indexes.setdefault(name, {"name": name, "unique": not non_unique, "columns": []})["columns"].append(col)

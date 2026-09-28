@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import math
 import re
+import threading
 from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import lru_cache
@@ -96,6 +98,19 @@ def cel_type_name(v: Any) -> str:
     if isinstance(v, ct.ListType):
         return "list<" + (cel_type_name(v[0]) if len(v) else "string") + ">"
     if isinstance(v, ct.MapType):
+        return "json"
+    # cel-python 的部分算术（如 double * double）返回 Python 原生类型，而不是 celtypes
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, int):
+        return "long"
+    if isinstance(v, float):
+        return "float"
+    if isinstance(v, dt.datetime):
+        return "datetime"
+    if isinstance(v, (list, tuple)):
+        return "list<" + (cel_type_name(v[0]) if len(v) else "string") + ">"
+    if isinstance(v, dict):
         return "json"
     return "string"
 
@@ -220,7 +235,41 @@ BUILTINS_DOC = {
     "filter": "list.filter(x, 条件)", "timestamp": "timestamp(s)",
 }
 _FUNCS = {k: v[0] for k, v in FUNCTIONS.items()}
-_ENV = celpy.Environment()
+# 转译执行器（把 CEL 转成 Python 代码）比解释执行快 4~6 倍；它必须是进程内第一个创建的环境（解析器全局共享、语法树类型随之确定）。
+# 个别表达式（如自定义函数）无法转译时回退为解释执行。转译执行器通过模块全局变量传递上下文，不是线程安全的，求值时加锁。
+_ENV = celpy.Environment(runner_class=celpy.CompiledRunner)
+_EVAL_LOCK = threading.Lock()
+logging.getLogger("celpy").setLevel(logging.CRITICAL)  # 逐行求值错误由我们转成问题记录，不需要库再打错误日志
+
+
+class _Runner:
+    def __init__(self, ast):
+        try:
+            self._r = celpy.CompiledRunner(_ENV, ast, _FUNCS)
+            self.compiled = True
+        except Exception:  # noqa: BLE001 — 转译器不支持的写法
+            self._r = celpy.InterpretedRunner(_ENV, ast, _FUNCS)
+            self.compiled = False
+
+    def evaluate(self, activation: dict) -> Any:
+        if not self.compiled:
+            return self._r.evaluate(activation)
+        with _EVAL_LOCK:
+            try:
+                return self._r.evaluate(activation)
+            except celpy.CELEvalError as e:
+                raise _unwrap(e) from None
+
+
+def _unwrap(e: celpy.CELEvalError) -> celpy.CELEvalError:
+    """转译执行器把错误再包一层 ('evaluation error', 类型, 内层参数)，取出最内层，保持与解释执行一致。"""
+    while len(e.args) > 2 and e.args[0] == "evaluation error" and isinstance(e.args[2], tuple):
+        inner = e.args[2]
+        if e.args[1] is celpy.CELEvalError:
+            e = celpy.CELEvalError(*inner)
+        else:
+            e = celpy.CELEvalError(str(inner[0]) if inner else "evaluation error", e.args[1], inner)
+    return e
 
 
 def function_catalog() -> list[dict]:
@@ -270,7 +319,7 @@ def _friendly(e: Exception) -> str:
     msg = str(e.args[0]) if getattr(e, "args", None) else str(e)
     if "divide by zero" in msg or "modulo by zero" in msg:
         return "除数为 0"
-    if "no matching overload" in msg:
+    if "no matching overload" in msg or "no such overload" in msg:
         return "运算的两边类型不一致"
     if "undeclared reference" in msg:
         m = re.search(r"undeclared reference to '([^']+)'", msg)
@@ -307,7 +356,7 @@ def compile_expr(
             raise ExprError(f"参数别名「{alias}」不存在，请先连接参数端口并设置别名")
         if f not in params[alias]:
             raise ExprError(f"参数「{alias}」中没有字段「{f}」")
-    prog = _ENV.program(ast, functions=_FUNCS)
+    prog = _Runner(ast)
     p = Program(expr, prog, referenced, ref_params, "meta" in idents, bool(NULL_AWARE & set(idents)),
                 param_aliases=list((params or {}).keys()))
     # 设计期试算

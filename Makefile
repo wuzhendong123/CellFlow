@@ -1,7 +1,7 @@
 # 常用命令（需先 cp .env.example .env 并按需修改）
 PY ?= python3
 
-.PHONY: deps install migrate api worker test lint
+.PHONY: deps install migrate api worker test lint e2e perf
 
 deps:            ## 启动本地依赖（MySQL / Redis / MinIO）
 	docker compose -f deploy/docker-compose.yml up -d
@@ -23,3 +23,9 @@ test:            ## 后端测试（需要可用的 MySQL / Redis，见 backend/t
 
 lint:
 	cd backend && ruff check cellflow tests alembic
+
+e2e:             ## 端到端验收（T29）：独立 e2e 库 + 真实 Worker + Playwright（需要 MySQL / Redis，前端已 npm ci）
+	cd frontend && PY=$(PY) ./e2e/run.sh
+
+perf:            ## 性能验收（10 万行 × 5 列文件，约 3 分钟）
+	cd backend && CF_PERF=1 $(PY) -m pytest -s tests/test_perf.py

@@ -59,7 +59,9 @@ def match_sheets(wb: Workbook, rule: dict) -> list[str]:
     return [n for n in names if n == value]
 
 
-def run_source(cfg: dict, wb: Workbook, node_id: str) -> SourceResult:
+def run_source(cfg: dict, wb: Workbook, node_id: str, row_limit: int | None = None,
+               full_ports: set[str] | frozenset = frozenset()) -> SourceResult:
+    """row_limit：预览采样时在类型转换前截断行数（full_ports 中的端口被引用，不截断）。"""
     rule = cfg.get("sheet") or {}
     names = match_sheets(wb, rule)
     res = SourceResult()
@@ -72,12 +74,12 @@ def run_source(cfg: dict, wb: Workbook, node_id: str) -> SourceResult:
         res.failed_ports.update(ports)
         return res
     if rule.get("match") != "REGEX":
-        return _run_sheet(cfg, wb, names[0], node_id)
+        return _run_sheet(cfg, wb, names[0], node_id, row_limit, full_ports)
     # 多 Sheet 同构合并（D15）：同一套区域逐 Sheet 执行后按字段名合并，并追加来源 Sheet 字段
     as_col = rule.get("asColumn") or "_sheet"
     per_port: dict[str, list[Dataset]] = {}
     for n in names:
-        part = _run_sheet(cfg, wb, n, node_id)
+        part = _run_sheet(cfg, wb, n, node_id, row_limit, full_ports)
         res.issues += [dict(i, sheet=n) for i in part.issues]
         res.locate_report += part.locate_report
         res.failed_ports |= part.failed_ports
@@ -114,7 +116,8 @@ def union_by_name(parts: list[Dataset]) -> Dataset:
     return out
 
 
-def _run_sheet(cfg: dict, wb: Workbook, sheet_name: str, node_id: str) -> SourceResult:
+def _run_sheet(cfg: dict, wb: Workbook, sheet_name: str, node_id: str, row_limit: int | None = None,
+               full_ports: set[str] | frozenset = frozenset()) -> SourceResult:
     res = SourceResult()
     lo = cfg.get("loaderOptions") or {}
     regions: list[dict] = cfg.get("regions", [])
@@ -179,6 +182,8 @@ def _run_sheet(cfg: dict, wb: Workbook, sheet_name: str, node_id: str) -> Source
             res.issues.append(_issue(node_id, r, {"code": e.code, "message": f"区域「{r.get('name')}」：{e.message}"}))
             res.failed_ports.add(r["outputPortId"])
             continue
+        if row_limit and r["outputPortId"] not in full_ports and len(sr.rows) > row_limit:
+            sr.rows, sr.lineage, sr.meta = sr.rows[:row_limit], sr.lineage[:row_limit], sr.meta[:row_limit]
         ds, issues, _stats = bind_and_coerce(
             sr, r.get("columns") or _default_specs(sr), node_id=node_id, region_id=r["regionId"],
             date1904=grid.date1904, cell_flag=_flag_lookup(grid), new_columns=r.get("newColumns", "DROP"),

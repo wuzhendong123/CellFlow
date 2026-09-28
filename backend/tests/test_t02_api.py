@@ -49,3 +49,17 @@ def test_suggest_and_preview(client):
     bad = dict(region, columns=[{"source": "奖励ID", "field": "params"}])
     r = client.post("/api/regions/preview", json={"fileId": fid, "sheet": "角色配置", "region": bad})
     assert r.status_code == 422
+
+
+def test_zip_bomb_rejected(client):
+    """解压后体积异常大的文件在解析前就被拒绝。"""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/workbook.xml", "<workbook/>")
+        z.writestr("xl/worksheets/sheet1.xml", b"\0" * (600 * 2**20))
+    r = upload(client, buf.getvalue())
+    assert len(buf.getvalue()) < 2 * 2**20
+    assert r.status_code == 413 and r.json()["code"] == "FILE_TOO_LARGE"
