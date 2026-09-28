@@ -23,6 +23,7 @@ def pytest_configure(config):
     os.environ.setdefault("CF_OP_TOKEN", "test-op-token")
     os.environ["CF_REF_TEST_BIZ"] = MYSQL_ROOT
     os.environ["CF_REF_TEST_APP_SECRET"] = "test-app-secret"
+    os.environ["CF_JOB_INLINE"] = "1"
 
 
 @pytest.fixture(scope="session")
@@ -76,3 +77,27 @@ def client(clean_meta):
     from cellflow.api.main import create_app
 
     return TestClient(create_app())
+
+
+@pytest.fixture
+def biz(meta_db, mysql_root):
+    """模拟业务库：每个用例重建三张业务表。"""
+    from sqlalchemy import create_engine
+
+    eng = create_engine(f"{MYSQL_ROOT}/{BIZ_DB}?charset=utf8mb4", future=True)
+    with eng.begin() as c:
+        for (t,) in c.execute(text("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()")).all():
+            c.execute(text(f"DROP TABLE `{t}`"))
+        c.execute(text("""CREATE TABLE cfg_hero_base_hp (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY, job_name VARCHAR(32) NOT NULL, lv INT NOT NULL, base_hp INT NOT NULL,
+            hp INT NULL, UNIQUE KEY uk_job_lv (job_name, lv)) CHARSET=utf8mb4"""))
+        c.execute(text("""CREATE TABLE cfg_level_reward (
+            id BIGINT PRIMARY KEY, job_name VARCHAR(32) NOT NULL, lv INT NOT NULL, item_id BIGINT NOT NULL,
+            item_count INT NOT NULL, item_name VARCHAR(64) NULL) CHARSET=utf8mb4"""))
+        c.execute(text("CREATE TABLE cfg_global_switch (max_open_days INT NOT NULL, double_exp TINYINT(1) NOT NULL DEFAULT 0) CHARSET=utf8mb4"))
+    from cellflow.services import datasources, files
+
+    datasources.engine_for.cache_clear()
+    files.clear_cache()
+    yield eng
+    eng.dispose()
