@@ -20,7 +20,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft
 .cf-splitter { width: 6px; cursor: col-resize; background: #f0f0f0; }
 .cf-result { height: 260px; border-top: 1px solid #eee; overflow: auto; }
 .cf-result.collapsed { height: 36px; overflow: hidden; }
-.cf-node { background: #fff; border: 1px solid #bfbfbf; border-radius: 6px; min-width: 150px; font-size: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.cf-node { background: #fff; border: 1px solid #bfbfbf; border-radius: 6px; min-width: 220px; font-size: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
 .cf-node.selected { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.2); }
 .cf-node.error { border-color: #ff4d4f; }
 .cf-node.flash { animation: cfflash 1s ease 2; }
@@ -28,7 +28,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft
 .cf-node .title { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; font-weight: 600; display: flex; gap: 6px; align-items: center; }
 .cf-node .badges { margin-left: auto; font-weight: 400; }
 .cf-node .ports { padding: 4px 8px; }
-.cf-node .port-row { position: relative; height: 20px; line-height: 20px; }
+.cf-node .port-row { position: relative; height: 20px; line-height: 20px; white-space: nowrap; }
+.cf-node .port-label { display: inline-block; max-width: 180px; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
 .cf-node .port-out { text-align: right; }
 .cf-node .param-handle { border-style: dashed !important; background: #fff !important; }
 .cf-node .ref-handle { border-radius: 2px !important; border-style: dashed !important; background: #fff !important; }

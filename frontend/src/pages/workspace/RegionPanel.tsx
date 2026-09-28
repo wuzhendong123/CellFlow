@@ -29,27 +29,61 @@ export default function RegionPanel({ node, fileId, sheets, selection, issues, o
   const upd = (patch: any) => setRegions(regions.map((r) => (r.regionId === active ? { ...r, ...patch } : r)));
   const updOpt = (patch: any) => upd({ shapeOptions: { ...(region?.shapeOptions || {}), ...patch } });
 
+  const currentSheet = () => (sheetRule.match === "EXACT" ? sheetRule.value : sheets[0]);
+
+  const buildRegion = (sug: any, range: RangeJson, name: string, rid: string, port: string) => ({
+    regionId: rid, name, shape: sug.shape, outputPortId: port,
+    designRange: { ...range, a1: toA1(range) }, locator: sug.locator,
+    shapeOptions: sug.shape === "DETAIL" ? { headerRows: 1 } : sug.shape === "KEY_VALUE" ? { keyCol: 1, valueCol: 2 } : sug.shape === "MATRIX" ? { rowHeaderCols: 1, colHeaderRows: 1, rowDims: ["row"], colDims: ["col"], valueName: "value", dropEmpty: true } : {},
+    columns: sug.columns || [],
+    recommended: { shape: sug.shape, locator: sug.locator?.type },
+  });
+
   const createFromSelection = async () => {
     if (!selection || !fileId) return;
-    const sheet = sheetRule.match === "EXACT" ? sheetRule.value : sheets[0];
     let sug: any = { shape: "DETAIL", locator: { type: "FIXED" }, columns: [] };
     try {
-      sug = await post("/api/regions/suggest", { fileId, sheet, range: selection });
+      sug = await post("/api/regions/suggest", { fileId, sheet: currentSheet(), range: selection });
     } catch (e: any) {
       message.warning("无法推荐形态：" + e.message);
     }
-    const ids = regions.map((r) => r.regionId);
-    const rid = newId("rg", ids);
+    const rid = newId("rg", regions.map((r) => r.regionId));
     const port = newId("out", regions.map((r) => r.outputPortId));
-    const r = {
-      regionId: rid, name: `区域${regions.length + 1}`, shape: sug.shape, outputPortId: port,
-      designRange: { ...selection, a1: toA1(selection) }, locator: sug.locator,
-      shapeOptions: sug.shape === "DETAIL" ? { headerRows: 1 } : sug.shape === "KEY_VALUE" ? { keyCol: 1, valueCol: 2 } : sug.shape === "MATRIX" ? { rowHeaderCols: 1, colHeaderRows: 1, rowDims: ["row"], colDims: ["col"], valueName: "value", dropEmpty: true } : {},
-      columns: sug.columns || [],
-      recommended: { shape: sug.shape, locator: sug.locator?.type },
-    };
-    setRegions([...regions, r]);
+    setRegions([...regions, buildRegion(sug, selection, `区域${regions.length + 1}`, rid, port)]);
     setActive(rid);
+  };
+
+  const [detecting, setDetecting] = useState(false);
+  const autoDetect = async () => {
+    const sheet = currentSheet();
+    if (!fileId || !sheet) return;
+    setDetecting(true);
+    try {
+      const res = await post("/api/regions/detect", { fileId, sheet });
+      const overlaps = (a: RangeJson, b: RangeJson) =>
+        a.startRow <= b.endRow && b.startRow <= a.endRow && a.startCol <= b.endCol && b.startCol <= a.endCol;
+      const next = [...regions];
+      let added = 0;
+      for (const sug of res.regions) {
+        if (next.some((r) => r.designRange && overlaps(r.designRange, sug.range))) continue; // 已圈选过的位置不重复添加
+        const rid = newId("rg", next.map((r) => r.regionId));
+        const port = newId("out", next.map((r) => r.outputPortId));
+        next.push(buildRegion(sug, sug.range, sug.name, rid, port));
+        added++;
+      }
+      if (!added) {
+        message.info(res.regions.length ? "识别到的区域都已存在" : "没有识别到表格区域，请手工框选");
+        return;
+      }
+      setRegions(next);
+      setActive(next[regions.length].regionId);
+      if (next[regions.length].designRange) onFocus(next[regions.length].designRange);
+      message.success(`识别出 ${added} 个区域，请逐个检查形态、范围与字段；不需要的可以删除`);
+    } catch (e: any) {
+      message.error("自动识别失败：" + e.message);
+    } finally {
+      setDetecting(false);
+    }
   };
 
   const regionIssues = (rid: string) => issues.filter((i) => i.node === node.id && (!i.region || i.region === rid));
@@ -82,11 +116,16 @@ export default function RegionPanel({ node, fileId, sheets, selection, issues, o
       </Card>
 
       <Card size="small" title="区域" extra={
-        <Tooltip title={selection ? `用选区 ${selection.a1} 新建` : "先在左侧表格中框选"}>
-          <Button id="create-region" size="small" type="primary" disabled={!selection} onClick={createFromSelection}>用选区新建区域</Button>
-        </Tooltip>
+        <Space size={4}>
+          <Tooltip title="按空行、空列自动切分当前 Sheet 并推荐形态、定位与字段，识别后可逐个调整">
+            <Button id="auto-detect" size="small" loading={detecting} disabled={!fileId || !currentSheet()} onClick={autoDetect}>自动识别</Button>
+          </Tooltip>
+          <Tooltip title={selection ? `用选区 ${selection.a1} 新建` : "先在左侧表格中框选"}>
+            <Button id="create-region" size="small" type="primary" disabled={!selection} onClick={createFromSelection}>用选区新建区域</Button>
+          </Tooltip>
+        </Space>
       } style={{ marginBottom: 8 }}>
-        <List size="small" dataSource={regions} locale={{ emptyText: "在左侧表格框选后新建区域" }}
+        <List size="small" dataSource={regions} locale={{ emptyText: "点「自动识别」，或在左侧表格框选后新建区域" }}
           renderItem={(r: any, i: number) => {
             const n = regionIssues(r.regionId).filter((x) => x.severity === "ERROR").length;
             return (

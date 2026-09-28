@@ -8,9 +8,9 @@ from pydantic import BaseModel
 from cellflow.api.common import ok
 from cellflow.api.deps import operator
 from cellflow.engine.columns import validate_column_specs
-from cellflow.engine.grid import WorkbookError, norm_text
-from cellflow.engine.locate import Rect, slice_block, suggest_locator
-from cellflow.engine.shapes import parse_detail, suggest_shape
+from cellflow.engine.detect import detect_regions, suggest_region
+from cellflow.engine.grid import WorkbookError
+from cellflow.engine.locate import Rect
 from cellflow.engine.source import preview_region
 from cellflow.engine.univer import sheet_snapshot
 from cellflow.errors import CFError
@@ -58,19 +58,18 @@ class SuggestIn(BaseModel):
 
 @router.post("/regions/suggest")
 def suggest(body: SuggestIn):
-    g = _grid(body.fileId, body.sheet)
-    rect = Rect.from_json(body.range)
-    block = slice_block(g, rect)
-    shape = suggest_shape(block)
-    loc = suggest_locator(g, rect)
-    columns = []
-    if shape in ("DETAIL", "SUMMARY"):
-        hdr = parse_detail(slice_block(g, Rect(rect.r1, rect.c1, rect.r1, rect.c2)), {"headerRows": 1})
-        columns = [{"source": h, "field": f"col{i + 1}", "type": "string"} for i, h in enumerate(hdr.headers)]
-    elif shape == "KEY_VALUE":
-        columns = [{"source": norm_text(block.values[i, 0]), "field": f"key{i + 1}", "type": "string"}
-                   for i in range(block.values.shape[0]) if norm_text(block.values[i, 0])]
-    return ok({"shape": shape, "locator": loc, "columns": columns, "range": rect.to_json()})
+    return ok(suggest_region(_grid(body.fileId, body.sheet), Rect.from_json(body.range)))
+
+
+class DetectIn(BaseModel):
+    fileId: int
+    sheet: str
+
+
+@router.post("/regions/detect")
+def detect(body: DetectIn):
+    """整张 Sheet 自动识别区域（按空行 / 空列切块），结果供用户逐个调整。"""
+    return ok({"regions": detect_regions(_grid(body.fileId, body.sheet))})
 
 
 class PreviewIn(BaseModel):

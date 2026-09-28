@@ -56,15 +56,30 @@ export default function SheetPane({ fileId, sheets, sheet, onSheet, overlays, hi
       presets: [UniverSheetsCorePreset({ container: host.current, header: false, toolbar: false, footer: false, formulaBar: false, contextMenu: false } as any)],
     });
     api.current = univerAPI;
-    const d = univerAPI.addEvent(univerAPI.Event.SelectionChanged, (p: any) => {
-      const s = p.selections?.[0];
-      if (!s || (unitId.current && p.workbook?.getId?.() !== unitId.current)) return;
-      const r = { startRow: s.startRow + 1, startCol: s.startColumn + 1, endRow: s.endRow + 1, endCol: s.endColumn + 1 };
-      const rj = { ...r, a1: toA1(r) };
-      setSel(rj);
-      onSelection(rj);
-    });
+    // 读取当前选区：Univer 只读模式下鼠标框选不一定触发选区事件，所以在松开鼠标 / 键盘时主动读取，并保留事件作为补充
+    let last = "";
+    const readSelection = () => {
+      try {
+        const wb = univerAPI.getActiveWorkbook();
+        if (!wb || (unitId.current && wb.getId() !== unitId.current)) return;
+        const s = wb.getActiveSheet()?.getSelection()?.getActiveRange()?.getRange();
+        if (!s) return;
+        const r = { startRow: s.startRow + 1, startCol: s.startColumn + 1, endRow: s.endRow + 1, endCol: s.endColumn + 1 };
+        const rj = { ...r, a1: toA1(r) };
+        if (rj.a1 === last) return;
+        last = rj.a1;
+        setSel(rj);
+        onSelection(rj);
+      } catch { /* 工作簿切换中 */ }
+    };
+    const later = () => setTimeout(readSelection, 0);
+    const el = host.current;
+    el.addEventListener("pointerup", later, true);
+    el.addEventListener("keyup", later, true);
+    const d = univerAPI.addEvent(univerAPI.Event.SelectionChanged, later);
     return () => {
+      el.removeEventListener("pointerup", later, true);
+      el.removeEventListener("keyup", later, true);
       d.dispose();
       univer.dispose();
       api.current = null;

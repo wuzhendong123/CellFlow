@@ -63,3 +63,15 @@ def test_zip_bomb_rejected(client):
     r = upload(client, buf.getvalue())
     assert len(buf.getvalue()) < 2 * 2**20
     assert r.status_code == 413 and r.json()["code"] == "FILE_TOO_LARGE"
+
+
+def test_detect_regions(client):
+    """整张 Sheet 自动识别：按空行 / 空列切块，块首单独的文本行作为区域名称。"""
+    fid = upload(client, fixtures.hero_config()).json()["data"]["fileId"]
+    rs = client.post("/api/regions/detect", json={"fileId": fid, "sheet": "角色配置"}).json()["data"]["regions"]
+    got = {r["range"]["a1"]: r["shape"] for r in rs}
+    assert got["A1:B5"] == "KEY_VALUE" and got["A8:F11"] == "MATRIX" and got["A17:E23"] == "DETAIL"
+    reward = next(r for r in rs if r["range"]["a1"] == "A17:E23")
+    assert [c["source"] for c in reward["columns"]] == ["奖励ID", "职业", "等级", "道具ID", "数量"]
+    note = next(r for r in rs if r["range"]["startCol"] == 8)
+    assert note["name"].startswith("填表说明")  # 标题行成为区域名称

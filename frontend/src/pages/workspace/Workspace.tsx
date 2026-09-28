@@ -83,12 +83,12 @@ function CfNode({ data, selected }: NodeProps<Node<NodeData>>) {
               {dataIns[i] && (
                 <>
                   <Handle type="target" id={dataIns[i].id} position={Position.Left} style={{ top: "50%" }} />
-                  <span>{dataIns[i].label}</span>
+                  <span className="port-label" title={dataIns[i].label}>{dataIns[i].label}</span>
                 </>
               )}
               {mainOuts[i] && (
                 <span style={{ position: "absolute", right: 0 }}>
-                  {mainOuts[i].label}
+                  <span className="port-label" title={mainOuts[i].label}>{mainOuts[i].label}</span>
                   {data.rows?.[mainOuts[i].id] !== undefined && <span className="cf-muted">（{data.rows[mainOuts[i].id]}行）</span>}
                   <Handle type="source" id={mainOuts[i].id} position={Position.Right} style={{ top: "50%" }} />
                 </span>
