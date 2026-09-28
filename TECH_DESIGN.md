@@ -2,9 +2,9 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.3 草案（待评审，**未定稿**） |
+| 文档版本 | v0.4 草案（待评审，**未定稿**；待 `PRD.md` 确认后定稿） |
 | 对应阶段 | KICKOFF 第 3 步「技术方案与数据模型」 |
-| 前置文档 | `PRD.md`、`WIREFRAME.md` 尚未产出，剩余产品假设列在 §14 |
+| 前置文档 | `PRD.md` 初稿已产出（待确认）；`WIREFRAME.md` 尚未产出；剩余问题列在 §14 |
 | 本版主要变化 | 按 2026-09-28 的确认结果（§0.2）调整：主流程改为**业务服务触发 → 自动校验 → 自动写入独占的 MySQL 业务表**；主键改为可选；回滚适配业务表 |
 
 ---
@@ -32,6 +32,11 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
 | D7 | 审批 | **校验通过就自动写**，不经人工审批 | 人的控制点前移到「方案版本发布」；新增**自动安全闸**（§10.2）兜底 |
 | D8 | 业务库 | **MySQL** | 元数据库也统一用 MySQL 8；§3、§10.3 按 MySQL 语义设计 |
 | D9 | 表归属 | 每张业务表**由一个解析方案独占** | 可安全整表替换；任何非 CellFlow 的写入都视为「漂移」并告警 |
+| D10 | 后端语言 | **Python**（3.11 + FastAPI + openpyxl + pandas） | §7 伪代码即实现语言 |
+| D11 | 辅助表 | DBA **接受**在业务库创建 `_cellflow_marker` | APPLY_DIFF 的崩溃恢复方案可行（§10.3、§10.4） |
+| D12 | 同方案多文件 | **只执行最新的一个** | 较早的任务标记为 `SUPERSEDED`，不写表（§10.1） |
+| D13 | 最终用户报错页 | **不需要** | 回调与 Open API 只返回结构化问题列表，不提供 `reportUrl`；Univer 高亮只在控制台内部使用 |
+| D14 | PRD | **需要**，先产出 `PRD.md` 确认后再定稿本文档 | 见 `PRD.md` |
 
 ### 0.3 本版变化与影响面分析（按 KICKOFF §3.1）
 
@@ -61,7 +66,7 @@ CellFlow 是一个**「Excel 解析方案」的配置与执行平台**：
  设计期（人 · Web 控制台 · 低频）          运行期（业务服务 · Open API · 高频）              运维期（人 · Web 控制台）
  ┌──────────────────────────────┐    ┌────────────────────────────────────┐    ┌─────────────────────────┐
  │ 1 用样例文件圈选、编排 DSL      │    │ 1 提交 ParseJob（文件 + 方案编码）      │    │ 任务监控 / 错误定位       │
- │ 2 绑定目标 MySQL 表、字段映射   │    │ 2 按方案串行排队                       │    │ 发布历史 / 变更明细       │
+ │ 2 绑定目标 MySQL 表、字段映射   │    │ 2 同方案只保留最新任务                 │    │ 发布历史 / 变更明细       │
  │ 3 试跑（PREVIEW / FULL 不写表）  │──▶│ 3 解析 → 校验 → 安全闸                  │──▶│ 一键回滚                  │
  │ 4 历史文件回归（新旧版本对比）   │    │ 4 通过：影子表灌数 → RENAME 原子切换     │    │ 安全闸拦截后的人工放行     │
  │ 5 发布方案版本（人的控制点）     │    │ 5 记录 Release + 快照 → 回调 / MQ 通知   │    │                         │
@@ -105,7 +110,7 @@ flowchart LR
     CA[Console API<br/>用户鉴权 · RBAC]
   end
 
-  Q[[任务队列<br/>按方案分区串行]]
+  Q[[任务队列<br/>同方案只执行最新]]
 
   subgraph ENG[解析 Worker]
     E1[Loader 单元格归一化] --> E2[Locator 定位 + 切片]
@@ -149,7 +154,7 @@ flowchart LR
 
 ```
 ① 业务服务 POST /open/v1/jobs（文件 + pipelineCode + idempotencyKey + callbackUrl）→ 返回 jobId
-② 任务入队；同一方案的任务严格串行（FIFO），不同方案并行
+② 任务入队；同一方案同一时刻只执行一个任务，排队中有更新的任务时较早的直接作废（SUPERSEDED）；不同方案并行
 ③ Worker：Loader → 定位切片 → 打平 → 列级清洗 → DAG → 快照写对象存储
 ④ 校验：存在 ERROR 级问题 → 任务 FAILED_VALIDATION，业务表不动，回调携带问题列表（精确到单元格）
 ⑤ Diff：新快照 vs 线上指针所指 Release 的快照 → 变更摘要（无变化 → NO_CHANGE，不写表）
@@ -261,6 +266,7 @@ CREATE TABLE cf_parse_job (
   file_id           BIGINT       NOT NULL,
   mode              VARCHAR(16)  NOT NULL,             -- EXECUTE | VALIDATE_ONLY | TEST
   status            VARCHAR(24)  NOT NULL,             -- 见 §10.1 状态机
+  superseded_by     BIGINT,                            -- D12：被哪个更新的任务作废
   callback_url      VARCHAR(512),
   error_summary     JSON,                              -- {error: n, warn: n, guard: "..."}
   metrics           JSON,                              -- 每节点行数、耗时、定位报告
@@ -874,12 +880,11 @@ L4 结构变换（画布 TRANSFORM 节点，用户按需拖入）
     {"table": "cfg_hero_base_hp", "rows": 120, "changes": {"c": 2, "u": 15, "d": 0}},
     {"table": "cfg_level_reward",  "rows": 860, "changes": {"c": 0, "u": 3, "d": 1}}
   ],
-  "issues": {"error": 0, "warn": 2},
-  "reportUrl": "https://cellflow.internal/jobs/88123"
+  "issues": {"error": 0, "warn": 2}
 }
 ```
 
-`status` 可能为：`PUBLISHED` / `NO_CHANGE` / `FAILED_VALIDATION` / `FAILED_GUARD` / `FAILED_WRITE` / `FAILED`；失败时附 `issues` 前 50 条与 `reportUrl`（控制台里用 Univer 高亮错误单元格的页面）。
+`status` 可能为：`PUBLISHED` / `NO_CHANGE` / `SUPERSEDED` / `FAILED_VALIDATION` / `FAILED_GUARD` / `FAILED_WRITE` / `FAILED`；失败时附 `issues` 前 50 条（含 `sheet/cell/field/value/message`），完整列表通过 `GET /open/v1/jobs/{jobId}/issues` 分页获取。
 
 另有 `event: "RELEASE_ROLLED_BACK"`：人工回滚后通知同一方案的订阅方。
 
@@ -1411,7 +1416,7 @@ def run_validator(cfg, inputs, ctx):
 - **不阻塞执行**：失败行进入 `out_reject`，主流带着通过的行继续跑完整个 DAG，这样**一次任务能暴露全部问题**，而不是改一个报一个。
 - **阻塞写表**：只要存在 ERROR 级 Issue，任务即为 `FAILED_VALIDATION`，业务表不动（安全闸 G1，不可人工放行）。WARN 不阻塞，随回调返回给调用方并在控制台展示。
   - 不提供「丢弃坏行后部分写入」：配置数据部分生效通常比不生效更危险。
-- **调用方反馈**：回调载荷附带前 50 条问题（含 `sheet/cell/message`）和 `reportUrl`，调用方可直接展示给上传文件的人。
+- **调用方反馈**：回调载荷附带前 50 条问题（含 `sheet/cell/field/value/message`），完整列表走 Open API 分页获取；是否及如何展示给其最终用户由调用方决定（D13：CellFlow 不提供对外报错页面）。
 - **控制台三级反馈**：
   1. 画布：节点右上角角标 `✖ 12 ⚠ 3`；侧输出端口显示行数；连线颜色按是否有被拒行变化。
   2. 问题面板：按节点/规则/Sheet 分组的列表，点击某条定位。
@@ -1425,7 +1430,13 @@ def run_validator(cfg, inputs, ctx):
 
 **并发规则**：
 
-- 同一方案的任务**严格串行**（FIFO）：队列按 `pipeline_id` 分区，Worker 执行前再在元数据库上 `GET_LOCK('cellflow:pipeline:{id}', 0)` 双保险。原因：每个任务都要与「线上指针」做 Diff 并切换同一批表，并行必然互相覆盖。
+- 同一方案**同一时刻只有一个任务在执行**：Worker 执行前在元数据库上 `GET_LOCK('cellflow:pipeline:{id}', 0)`。原因：每个任务都要与「线上指针」做 Diff 并切换同一批表，并行必然互相覆盖。
+- **只执行最新的一个（D12）**，「最新」以提交顺序（`cf_parse_job.id`）为准，只针对 `mode=EXECUTE` 的任务：
+  1. 新任务提交时，把该方案所有 `QUEUED` 状态的 EXECUTE 任务置为 `SUPERSEDED`（`superseded_by` = 新任务 ID），并回调通知各自的提交方；
+  2. 正在 `RUNNING` 的较早任务在**进入写表前**再检查一次：若已有更新的 EXECUTE 任务，则放弃写表，置为 `SUPERSEDED`；
+  3. 已经开始写表（Release 为 `WRITING`）的任务不中断，正常完成，随后执行最新任务；
+  4. `VALIDATE_ONLY` / `TEST` 任务不写表，既不作废别人、也不被作废。
+  - 语义保证：业务表最终一定是**最后提交的那份文件**的结果（前提是它通过校验与安全闸；若它失败，业务表保持原样，不会回退去执行被作废的旧文件）。
 - 不同方案并行；每个 MySQL 数据源同时执行写入的任务数有上限（默认 2），避免集中 DDL 冲击业务库。
 - **版本锁定**：任务在**提交时**锁定方案版本（`revision_id`），排队期间发布新版本不影响已提交任务，结果可复现。
 - **幂等**：`(client_app_id, idempotency_key)` 唯一；文件 sha256 与线上 Release 所用文件相同且方案版本相同 → 直接 `NO_CHANGE`。
@@ -1434,12 +1445,16 @@ def run_validator(cfg, inputs, ctx):
 **状态机**：
 
 ```
-SUBMITTED → QUEUED → RUNNING ─┬─ ERROR 级问题 ────────────────→ FAILED_VALIDATION   （业务表未动）
-                              ├─ mode=VALIDATE_ONLY / TEST ───→ VALIDATED
-                              ├─ 与线上内容完全相同 ──────────→ NO_CHANGE
-                              ├─ 安全闸不通过 ────────────────→ FAILED_GUARD        （业务表未动；管理员可放行）
-                              └─ 写入 ─┬─ 成功 ───────────────→ PUBLISHED
-                                       └─ 失败（已自动清理）───→ FAILED_WRITE        （业务表未动）
+SUBMITTED → QUEUED ──(有更新的 EXECUTE 任务)──────────────→ SUPERSEDED          （业务表未动）
+               │
+               ▼
+            RUNNING ─┬─ ERROR 级问题 ─────────────────────→ FAILED_VALIDATION   （业务表未动）
+                     ├─ mode=VALIDATE_ONLY / TEST ────────→ VALIDATED
+                     ├─ 与线上内容完全相同 ───────────────→ NO_CHANGE
+                     ├─ 安全闸不通过 ─────────────────────→ FAILED_GUARD        （业务表未动；管理员可放行）
+                     ├─ 写表前发现更新的 EXECUTE 任务 ────→ SUPERSEDED          （业务表未动）
+                     └─ 写入 ─┬─ 成功 ────────────────────→ PUBLISHED
+                              └─ 失败（已自动清理）───────→ FAILED_WRITE        （业务表未动）
 任何阶段的系统异常 → FAILED；Worker 崩溃 → 由恢复程序按 write_plan 判定最终状态（§10.4）
 ```
 
@@ -1532,7 +1547,7 @@ def write_apply_diff(job, plan, conn):
 ```
 
 - 主键需与目标表的主键或唯一索引一致（否则 UPDATE/DELETE 会全表扫描），绑定时检查。
-- `_cellflow_marker` 是 CellFlow 在业务库中唯一需要创建的辅助表（一行一个方案），**需 DBA 同意**（§14-Q4）。
+- `_cellflow_marker` 是 CellFlow 在业务库中唯一需要创建的辅助表（一行一个方案），DBA 已同意（D11）。
 
 ### 10.4 崩溃恢复
 
@@ -1649,7 +1664,8 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 写入 | RENAME 等待元数据锁 | 3s 超时 + 退避重试，最终失败业务表不变 |
 | 写入 | 大表灌数导致从库延迟 | 分批写入，检测从库延迟超阈值时暂停 |
 | 写入 | Worker 在写入中途崩溃 | 按 `write_plan` 恢复（§10.4） |
-| 并发 | 同方案同时收到多个文件 | 串行 FIFO；每个都生成 Release（可选「只保留最新」，§14-Q5） |
+| 并发 | 同方案短时间收到多个文件 | 只执行最新的一个，较早的标记 `SUPERSEDED` 并回调（D12） |
+| 并发 | 最新文件校验失败 | 业务表保持原样，不回退执行被作废的旧文件；调用方需修正后重新提交 |
 | 并发 | 任务排队期间方案发布了新版本 | 使用提交时锁定的版本；回调中返回实际使用的版本号 |
 | 回滚 | 回滚后下一份文件马上又覆盖 | 回滚默认冻结方案 |
 | 回滚 | 目标快照已过保留期 | 不可选，控制台置灰 |
@@ -1668,7 +1684,7 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 性能目标（建议值，待 PRD 确认） | 单文件 ≤ 20MB、≤ 50 万有效单元格：试跑预览 < 3s；解析 + 校验 < 30s；写表视行数而定（10 万行约 1 分钟内） |
 | 大文件 | openpyxl 普通模式内存约为文件大小的 30~50 倍；超过阈值的 Sheet 改用 `python-calamine` 快速读取值（新依赖，需审批） |
 | 执行隔离 | 任务在独立 Worker 进程执行，限制 CPU 时间/内存；API 进程不做解析 |
-| 吞吐 | 按方案串行、方案间并行；每个数据源写入并发上限；调用方按 AppKey 限流 |
+| 吞吐 | 同方案只执行最新任务、方案间并行；每个数据源写入并发上限；调用方按 AppKey 限流 |
 | 缓存 | 同一 `fileId + sheet + loaderOptions` 的网格在 Worker 内 LRU 缓存，控制台连续调参时复用 |
 | 权限 | 控制台角色：查看者 / 编辑者（改方案、试跑）/ 发布者（发布方案版本）/ 管理员（放行安全闸、回滚、解冻、管理数据源与调用方） |
 | 审计 | 方案版本发布、任务、写入、放行、回滚、冻结/解冻全部留痕（谁、何时、哪个文件、哪个版本） |
@@ -1686,9 +1702,9 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | 画布 | **React Flow**（备选 AntV X6） | React 生态原生，端口/连线/自定义节点够用 |
 | 表格预览 | **Univer**（只读 + 选区 API，数据由服务端转换，D5） | Canvas 渲染、大表流畅 |
 | 表达式 | **CEL**（cel-python / cel-js） | 安全、可类型检查、前后端同一语义 |
-| 后端 | Python 3.11 + FastAPI（§14-Q1 待定） | pandas/numpy 做区域运算最直接；若团队以 Java 为主可换 Spring Boot + Apache POI，设计不变 |
+| 后端 | **Python 3.11 + FastAPI**（D10） | pandas/numpy 做区域运算最直接 |
 | Excel 读取 | openpyxl（主）+ python-calamine（大文件快速路径，v2） | 前者信息全，后者快 |
-| 任务队列 | Redis + arq（或 Celery） | 按方案分区串行、延迟重试 |
+| 任务队列 | Redis + arq（或 Celery） | 按方案加锁、作废旧任务、延迟重试 |
 | 元数据库 | **MySQL 8**（D8，与业务库同技术栈，分库部署） | JSON 列、团队运维熟悉 |
 | MySQL 驱动 | SQLAlchemy Core + PyMySQL | 需要精确控制 DDL 与事务，不用 ORM |
 | 快照 / 原始文件 | S3 兼容对象存储；快照格式 Parquet（pyarrow）或 JSONL.gz | 不可变、便宜、按需读取 |
@@ -1706,26 +1722,22 @@ def rollback(pipeline_id, target_release_id, expected_live_id, operator, reason,
 | R4 | 策划改表导致定位漂移 | ANCHOR/AUTO_EXPAND 定位器 + 定位报告 + 表头按名绑定 |
 | R5 | 公式缓存值缺失导致数据为空 | Loader 检测并报 ERROR |
 | R6 | 未声明主键时变更明细可读性差（修改显示为一删一增） | 绑定时若目标表有主键/唯一索引，自动**建议**同名字段作为主键（不强制） |
-| R7 | 业务库权限需要 DDL | 与 DBA 约定最小权限与专用账号；APPLY_DIFF 场景需创建 `_cellflow_marker` 表 |
+| R7 | 业务库权限需要 DDL | 与 DBA 约定最小权限与专用账号；`_cellflow_marker` 表 DBA 已同意（D11） |
 
 ---
 
 ## 14. 待确认问题
 
-已确认的问题见 §0.2（D1~D9）。剩余：
+已确认的问题见 §0.2（D1~D14）。剩余问题已并入 `PRD.md` §8，确认后回填本节：
 
 | # | 问题 | 我的建议 |
 |---|---|---|
-| Q1 | 后端语言：Python 还是 Java？ | 无团队约束时选 Python |
 | Q2 | 调用方如何把文件交给 CellFlow：直接上传（multipart）还是先放对象存储再传文件键？ | 两者都支持；大于 20MB 只允许文件键 |
-| Q3 | 是否需要 `VALIDATE_ONLY` 预检模式（调用方在自己的上传页面先预检、再正式提交）？ | 需要，成本低、体验好 |
-| Q4 | APPLY_DIFF 需要在业务库创建一张 `_cellflow_marker` 小表用于崩溃恢复，DBA 是否接受？ | 接受；不接受则 v1 只提供 SWAP |
-| Q5 | 同一方案短时间收到多个文件：全部依次执行，还是只执行最新的一个（旧的标记为 SUPERSEDED）？ | 默认全部依次执行，方案级可选「只保留最新」 |
+| Q3 | 是否需要 `VALIDATE_ONLY` 预检模式？ | 需要，成本低 |
 | Q6 | 安全闸默认阈值（行数波动 50%、删除比例 30%）是否合适？ | 先用默认值，按方案调整 |
 | Q7 | 快照与备份表保留多久？ | 快照：最近 50 个 Release 或 180 天；备份表：最近 3 份 |
-| Q8 | 调用方的最终用户是否需要打开 CellFlow 的报错页面（`reportUrl`）？若需要，是否要免登录的临时链接？ | 需要；使用带过期时间的只读签名链接 |
-| Q9 | 性能目标（最大文件、最大行数、端到端时延）以哪个为准？ | 以 §12 建议值为起点，PRD 中确认 |
-| Q10 | `PRD.md` / `WIREFRAME.md` 是否需要补齐后再定稿本文档？ | 建议补一版精简 PRD（验收标准）后定稿 |
+| Q9 | 性能目标（最大文件、最大行数、端到端时延） | 以 §12 建议值为起点 |
+| Q11 | APPLY_DIFF 是否进 v1？（辅助表已获 DBA 同意，技术上已无阻碍） | 取决于首批要接入的业务表中是否有触发器/外键/被引用的自增 ID |
 
 ---
 
