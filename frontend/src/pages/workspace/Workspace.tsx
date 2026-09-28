@@ -26,6 +26,8 @@ import SheetPane, { Overlay } from "./SheetPane";
 
 type Layout = "canvas" | "lr" | "tb";
 const LAYOUT_KEY = "cellflow.layout";
+const CONFIG_WIDTH_KEY = "cellflow.configWidth";
+const CONFIG_WIDTH = 440;
 
 /** 上手指引：按方案当前状态列出下一步，每步一个直接可点的动作。 */
 function GettingStarted({ dsl, fileName, job, fresh, published, onAddSource, onAddSink, onPreview, onSelect }: any) {
@@ -186,6 +188,9 @@ function Inner({ pipeline, reload }: Props) {
   const [highlight, setHighlight] = useState<{ cell: string; nonce: number } | null>(null);
   const [job, setJob] = useState<any>(null);
   const [jobSig, setJobSig] = useState("");
+  const [configWidth, setConfigWidth] = useState<number>(() => {
+    try { return Number(localStorage.getItem(CONFIG_WIDTH_KEY)) || CONFIG_WIDTH; } catch { return CONFIG_WIDTH; }
+  });
   const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
   const [focusData, setFocusData] = useState<{ node: string; nonce: number } | null>(null);
   const [issues, setIssues] = useState<any[]>([]);
@@ -510,7 +515,7 @@ function Inner({ pipeline, reload }: Props) {
   );
 
   const config = (
-    <div className="cf-config" data-testid="config-panel">
+    <div className="cf-config" data-testid="config-panel" style={{ width: configWidth }}>
       {selNode?.type === "EXCEL_SOURCE" ? (
         <RegionPanel node={selNode} fileId={pipeline.sampleFileId} sheets={sheets} selection={selection} issues={issues}
           onChange={(cfg) => updateNode(selNode.id, { config: cfg })} onFocus={(r) => { openSplit(selNode.id); setFocusRange({ range: r, nonce: Date.now() }); }}
@@ -541,8 +546,27 @@ function Inner({ pipeline, reload }: Props) {
     </div>
   );
 
+  // 右侧配置面板宽度可拖动调整（记住在本机）；双击分隔条恢复默认
+  const configHandle = (
+    <div className="cf-splitter" id="config-splitter" title="拖动调整右侧面板宽度，双击恢复默认"
+      onDoubleClick={() => { setConfigWidth(CONFIG_WIDTH); try { localStorage.removeItem(CONFIG_WIDTH_KEY); } catch { /* 忽略 */ } }}
+      onMouseDown={(e) => {
+        e.preventDefault();
+        const start = e.clientX; const w0 = configWidth;
+        let w = w0;
+        document.body.style.userSelect = "none";
+        const move = (ev: MouseEvent) => { w = Math.round(Math.min(window.innerWidth * 0.7, Math.max(320, w0 - (ev.clientX - start)))); setConfigWidth(w); };
+        const up = () => {
+          document.body.style.userSelect = "";
+          window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
+          try { localStorage.setItem(CONFIG_WIDTH_KEY, String(w)); } catch { /* 忽略 */ }
+        };
+        window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+      }} />
+  );
+
   const body = layout.mode === "canvas" ? (
-    <div className="cf-ws-body">{palette}{canvas}{config}</div>
+    <div className="cf-ws-body">{palette}{canvas}{configHandle}{config}</div>
   ) : layout.mode === "lr" ? (
     <div className="cf-ws-body">
       {palette}
@@ -554,6 +578,7 @@ function Inner({ pipeline, reload }: Props) {
         window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
       }} />
       <div style={{ flex: 1 - layout.ratio, display: "flex", minWidth: 200 }}>{canvas}</div>
+      {configHandle}
       {config}
     </div>
   ) : (
@@ -563,6 +588,7 @@ function Inner({ pipeline, reload }: Props) {
         <div style={{ flex: layout.ratio, display: "flex", minHeight: 200 }}>{sheetPane}</div>
         <div style={{ flex: 1 - layout.ratio, display: "flex", borderTop: "1px solid #eee" }}>{canvas}</div>
       </div>
+      {configHandle}
       {config}
     </div>
   );
