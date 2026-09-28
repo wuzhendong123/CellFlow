@@ -1,6 +1,6 @@
-import { Alert, App, Button, Card, Checkbox, Drawer, Input, InputNumber, Radio, Select, Space, Table, Tag, Tooltip } from "antd";
+import { Alert, App, AutoComplete, Button, Card, Checkbox, Drawer, Input, InputNumber, Modal, Radio, Select, Space, Table, Tag, Tooltip } from "antd";
 import { useEffect, useState } from "react";
-import { get, post } from "../../api";
+import { get, opCall, post } from "../../api";
 import { Dsl, DslNode, outputPorts } from "../../dsl";
 import ExprEditor, { insertIntoExpr } from "./ExprEditor";
 
@@ -400,12 +400,80 @@ function SinkForm({ node, cfg, set, main, pipeline, dsl }: any) {
   );
 }
 
+const SQL_TYPES = ["VARCHAR(64)", "VARCHAR(255)", "VARCHAR(1024)", "TEXT", "INT", "BIGINT", "DOUBLE", "DECIMAL(20,2)", "DECIMAL(20,4)", "DECIMAL(20,8)", "TINYINT(1)", "DATE", "DATETIME", "JSON"];
+
+/** 按上游字段新建目标表：推荐列名 / 类型 / 主键，可修改，预览建表语句后创建（需口令）。 */
+function CreateTableModal({ pipeline, cfg, node, main, existing, onClose, onCreated }: any) {
+  const { message } = App.useApp();
+  const snake = (x: string) => (x || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase();
+  const [table, setTable] = useState(() => { const t = snake(cfg.dataset || node.label || node.id); return /^[a-z_]/.test(t) ? t : `t_${t}`; });
+  const [cols, setCols] = useState<any[]>([]);
+  const [pk, setPk] = useState<string[]>([]);
+  const [ddl, setDdl] = useState<{ ddl?: string; error?: string }>({});
+  const [busy, setBusy] = useState(false);
+  const ds = pipeline.datasourceId;
+  useEffect(() => {
+    const keys = cfg.binding?.keyFields || (main?.columns || []).filter((c: any) => c.isKey).map((c: any) => c.field);
+    post(`/api/datasources/${ds}/tables/propose`, { fields: (main?.columns || []).map((c: any) => ({ field: c.field, type: c.type })), keyFields: keys })
+      .then((r) => { setCols(r.columns); setPk(r.primaryKey); }).catch((e) => message.error(e.message));
+  }, []);
+  useEffect(() => {
+    if (!cols.length) return;
+    const t = setTimeout(() => post(`/api/datasources/${ds}/tables/ddl`, { table, columns: cols, primaryKey: pk })
+      .then((r) => setDdl({ ddl: r.ddl })).catch((e) => setDdl({ error: e.message })), 300);
+    return () => clearTimeout(t);
+  }, [table, JSON.stringify(cols), JSON.stringify(pk)]);
+  const upd = (i: number, p: any) => setCols(cols.map((c, j) => (j === i ? { ...c, ...p } : c)));
+  const create = async () => {
+    setBusy(true);
+    try {
+      const r = await opCall({ title: `在业务库新建表 ${table}`, summary: `将在数据源中执行下面的建表语句（只新建，不修改已有表）：\n\n${ddl.ddl}` },
+        "POST", `/api/datasources/${ds}/tables`, () => ({ table, columns: cols, primaryKey: pk }));
+      if (r) {
+        message.success(`已新建表 ${table}，并完成字段映射`);
+        onCreated(table, r.table, cols, cols.filter((c) => pk.includes(c.name)).map((c) => c.field));
+      }
+    } catch (e: any) {
+      message.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal open width={860} title="按上游字段新建目标表" onCancel={onClose} okText="创建… 🔒" cancelText="取消"
+      okButtonProps={{ id: "do-create-table", loading: busy, disabled: !ddl.ddl || existing.includes(table) }} onOk={create}>
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <Alert type="info" showIcon message="列名由字段名转成下划线形式，类型按字段类型推荐，都可以修改；没有选主键时会自动加一个自增 id 列。只会新建表，不会修改已有的表。" />
+        <Space>
+          <span>表名</span>
+          <Input id="new-table-name" className="cf-mono" style={{ width: 260 }} value={table} onChange={(e) => setTable(e.target.value.trim())}
+            status={existing.includes(table) ? "error" : undefined} />
+          {existing.includes(table) && <span className="cf-err">已存在同名表</span>}
+        </Space>
+        <Table size="small" rowKey={(_, i) => String(i)} pagination={false} dataSource={cols} scroll={{ y: 300 }} columns={[
+          { title: "来源字段", dataIndex: "field", width: 170, render: (v) => <span className="cf-mono">{v}</span> },
+          { title: "列名", dataIndex: "name", width: 200, render: (v, _, i) => <Input size="small" className="cf-mono" value={v} onChange={(e) => upd(i, { name: e.target.value.trim() })} /> },
+          { title: "类型", dataIndex: "sqlType", width: 170, render: (v, _, i) => <AutoComplete size="small" style={{ width: 160 }} value={v} options={SQL_TYPES.map((t) => ({ value: t }))} onChange={(x) => upd(i, { sqlType: x })} /> },
+          { title: "可空", dataIndex: "nullable", width: 60, render: (v, c: any, i) => <Checkbox checked={v && !pk.includes(c.name)} disabled={pk.includes(c.name)} onChange={(e) => upd(i, { nullable: e.target.checked })} /> },
+          { title: "", width: 40, render: (_: any, __: any, i: number) => <a onClick={() => setCols(cols.filter((_c, j) => j !== i))}>✕</a> },
+        ]} />
+        <Space>
+          <span>主键</span>
+          <Select mode="multiple" style={{ minWidth: 320 }} placeholder="不选则自动加自增 id" value={pk} onChange={setPk} options={cols.map((c) => ({ value: c.name, label: c.name }))} />
+        </Space>
+        {ddl.error ? <Alert type="error" showIcon message={ddl.error} /> : ddl.ddl && <pre id="create-table-ddl" className="cf-mono" style={{ fontSize: 12, background: "#fafafa", padding: 8, maxHeight: 220, overflow: "auto", margin: 0 }}>{ddl.ddl}</pre>}
+      </Space>
+    </Modal>
+  );
+}
+
 function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: any) {
   const { message } = App.useApp();
   const b = cfg.binding || {};
   const [tables, setTables] = useState<any[]>([]);
   const [desc, setDesc] = useState<any>(null);
   const [check, setCheck] = useState<any>(null);
+  const [creating, setCreating] = useState(false);
   const setB = (p: any) => set({ binding: { ...b, ...p } });
   useEffect(() => {
     if (open && pipeline) get<any[]>(`/api/datasources/${pipeline.datasourceId}/tables`).then(setTables).catch((e) => message.error(e.message));
@@ -432,7 +500,19 @@ function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: a
           <Select id="binding-table" showSearch style={{ width: 260 }} value={b.table || undefined} placeholder="选择业务表"
             options={tables.map((t) => ({ value: t.table, label: t.owner && t.owner.pipelineId !== pipeline?.id ? `${t.table}（已被 ${t.owner.pipelineCode} 占用）` : t.table, disabled: !!(t.owner && t.owner.pipelineId !== pipeline?.id) }))}
             onChange={async (v) => { setB({ table: v, columnMapping: [] }); const d = await get(`/api/datasources/${pipeline.datasourceId}/tables/${v}`); setDesc(d); autoMap(d); }} />
+          <Tooltip title="还没有表？按上游字段自动生成表结构，确认后在业务库里新建">
+            <Button id="create-table" disabled={!main?.columns?.length} onClick={() => setCreating(true)}>新建表…</Button>
+          </Tooltip>
         </Space>
+        {creating && (
+          <CreateTableModal pipeline={pipeline} cfg={cfg} node={node} main={main} existing={tables.map((t) => t.table)} onClose={() => setCreating(false)}
+            onCreated={(table: string, d: any, cols: any[], pkFields: string[]) => {
+              setCreating(false);
+              setTables([...tables, { table }]);
+              setDesc(d);
+              setB({ table, columnMapping: cols.filter((c) => c.field).map((c) => ({ field: c.field, column: c.name })), keyFields: pkFields.length ? pkFields : null });
+            }} />
+        )}
         {check && (
           <>
             {check.errors.map((e: any, i: number) => <Alert key={i} type="error" showIcon message={e.message} className="binding-error" />)}

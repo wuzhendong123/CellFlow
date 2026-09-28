@@ -528,3 +528,44 @@ def test_datasource_direct_mode(client, biz):
     assert bad.status_code == 400
     lst = client.get("/api/datasources").text
     assert u.password not in lst
+
+
+def test_create_target_table_from_fields(client, biz):
+    """按上游字段新建目标表（需口令、留审计）→ 绑定 → 发布 → 写入。"""
+    env = setup_pipeline(client, publish=False)
+    ds = env["datasource"]["id"]
+    fields = [{"field": "rewardId", "type": "long"}, {"field": "job", "type": "string"}, {"field": "level", "type": "int"},
+              {"field": "itemId", "type": "long"}, {"field": "count", "type": "int"}, {"field": "itemName", "type": "string"}]
+    prop = okd(client.post(f"/api/datasources/{ds}/tables/propose", json={"fields": fields, "keyFields": ["rewardId"]}))
+    assert [c["name"] for c in prop["columns"]] == ["reward_id", "job", "level", "item_id", "count", "item_name"]
+    assert prop["primaryKey"] == ["reward_id"] and prop["columns"][0]["sqlType"] == "BIGINT"
+    body = {"table": "auto_level_reward", "columns": prop["columns"], "primaryKey": prop["primaryKey"]}
+    ddl = okd(client.post(f"/api/datasources/{ds}/tables/ddl", json=body))["ddl"]
+    assert "PRIMARY KEY (`reward_id`)" in ddl and "`reward_id` BIGINT NOT NULL" in ddl
+    assert client.post(f"/api/datasources/{ds}/tables", json=body).status_code == 403  # 需要口令
+    created = okd(client.post(f"/api/datasources/{ds}/tables", json=body, headers=OP))
+    assert [c["name"] for c in created["table"]["columns"]][:2] == ["reward_id", "job"]
+    assert client.post(f"/api/datasources/{ds}/tables", json=body, headers=OP).json()["code"] == "TABLE_EXISTS"
+    bad = client.post(f"/api/datasources/{ds}/tables/ddl", json={**body, "table": "x; drop table y"})
+    assert bad.status_code == 400
+    bad = client.post(f"/api/datasources/{ds}/tables/ddl", json={**body, "columns": [{**prop["columns"][0], "sqlType": "INT; DROP"}]})
+    assert bad.status_code == 400
+    # 无主键：自动加自增 id
+    ddl2 = okd(client.post(f"/api/datasources/{ds}/tables/ddl", json={"table": "t2", "columns": prop["columns"], "primaryKey": []}))["ddl"]
+    assert "`id` BIGINT NOT NULL AUTO_INCREMENT" in ddl2 and "PRIMARY KEY (`id`)" in ddl2
+    # 绑定新表、发布、写入
+    pid = env["pipeline"]["id"]
+    draft = okd(client.get(f"/api/pipelines/{pid}/draft"))
+    dsl = draft["dsl"]
+    for n in dsl["nodes"]:
+        if n["id"] == "sink_reward":
+            n["config"]["binding"]["table"] = "auto_level_reward"
+            n["config"]["binding"]["columnMapping"] = [{"field": c["field"], "column": c["name"]} for c in prop["columns"]]
+    saved = okd(client.put(f"/api/pipelines/{pid}/draft", json={"dsl": dsl, "draftVersion": draft["draftVersion"]}, headers=WHO))
+    okd(client.post(f"/api/pipelines/{pid}/publish", json={"draftVersion": saved["draftVersion"]}, headers=OP))
+    j = job(client, submit(client, env["app"], fixtures.hero_config()).json()["data"]["jobId"])
+    assert j["status"] == "PUBLISHED", j
+    got = rows(biz, "auto_level_reward", "reward_id")
+    assert len(got) == 5 and got[0]["item_name"] == "金币"
+    logs = okd(client.get("/api/audit-logs?action=CREATE_TABLE"))["rows"]
+    assert logs and "auto_level_reward" in str(logs[0]["detail"])

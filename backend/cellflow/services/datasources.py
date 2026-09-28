@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from urllib.parse import quote_plus
 
@@ -300,3 +301,85 @@ def check_binding(ds_id: int, binding: dict, input_columns: list[dict] | None, p
         warnings.append({"code": "TAKEOVER_BASELINE", "message": f"目标表已有 {desc['rowCount']} 行数据，首次发布前会保存为基线，可回滚到接管前"})
     return {"ok": not errors, "errors": errors, "warnings": warnings, "table": desc, "keySuggestion": suggestion,
             "strategies": {"SWAP": not reasons, "APPLY_DIFF": False}}
+
+
+# ======================= 按上游字段新建目标表 =======================
+_IDENT = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
+_SQL_TYPE = re.compile(r"^(VARCHAR\((\d{1,5})\)|TEXT|INT|BIGINT|DOUBLE|DECIMAL\((\d{1,2}),(\d{1,2})\)|TINYINT\(1\)|DATE|DATETIME|JSON)$")
+
+
+def snake_case(name: str) -> str:
+    s = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name or "")
+    s = re.sub(r"[^A-Za-z0-9_]+", "_", s).strip("_").lower()
+    return (s if s and not s[0].isdigit() else f"c_{s}")[:64] or "col"
+
+
+def sql_type_for(t: str) -> str:
+    """CellFlow 字段类型 → MySQL 列类型（可在建表前修改）。"""
+    t = (t or "string").strip()
+    m = re.match(r"^decimal\((\d+),\s*(\d+)\)$", t)
+    if m:
+        return f"DECIMAL({m.group(1)},{m.group(2)})"
+    return {"int": "INT", "long": "BIGINT", "float": "DOUBLE", "decimal": "DECIMAL(20,4)", "bool": "TINYINT(1)",
+            "date": "DATE", "datetime": "DATETIME", "json": "JSON", "enum": "VARCHAR(64)"}.get(
+        t, "JSON" if t.startswith(("list", "struct", "map")) else "VARCHAR(255)")
+
+
+def propose_table(fields: list[dict], key_fields: list[str] | None) -> dict:
+    """按上游字段推荐建表：字段名转下划线列名、类型映射；有主键字段用它们，否则加自增 id。"""
+    used: set[str] = set()
+    cols = []
+    for f in fields:
+        name = base = snake_case(f["field"])
+        k = 2
+        while name in used or (not key_fields and name == "id"):
+            name, k = f"{base}_{k}", k + 1
+        used.add(name)
+        is_key = f["field"] in (key_fields or [])
+        cols.append({"field": f["field"], "name": name, "sqlType": sql_type_for(f.get("type", "string")), "nullable": not is_key})
+    pk = [c["name"] for c in cols if c["field"] in (key_fields or [])]
+    return {"columns": cols, "primaryKey": pk}
+
+
+def create_table_ddl(ds_id: int, table: str, columns: list[dict], primary_key: list[str]) -> str:
+    table = (table or "").strip()
+    if not _IDENT.match(table) or any(m in table for m in INTERNAL_TABLE_MARKERS) or table in (MARKER_TABLE, "_cellflow_probe"):
+        raise CFError("INVALID_REQUEST", "表名只能用小写字母、数字、下划线，以字母或下划线开头，最长 64 位", 400)
+    if not columns:
+        raise CFError("INVALID_REQUEST", "至少需要一列", 400)
+    names = [c.get("name", "") for c in columns]
+    bad = [n for n in names if not _IDENT.match(n or "")]
+    if bad:
+        raise CFError("INVALID_REQUEST", f"列名不合法：{'、'.join(bad)}（小写字母、数字、下划线）", 400)
+    if len(set(names)) != len(names):
+        raise CFError("INVALID_REQUEST", "列名重复", 400)
+    pk = [p for p in (primary_key or []) if p]
+    if any(p not in names for p in pk):
+        raise CFError("INVALID_REQUEST", "主键列必须是表中的列", 400)
+    lines = []
+    if not pk:
+        if "id" in names:
+            raise CFError("INVALID_REQUEST", "没有选主键时会自动加自增 id 列，请把现有的 id 列改名或设为主键", 400)
+        lines.append("  `id` BIGINT NOT NULL AUTO_INCREMENT")
+    for c in columns:
+        t = (c.get("sqlType") or "").strip().upper()
+        m = _SQL_TYPE.match(t)
+        if not m or (m.group(2) and not 0 < int(m.group(2)) <= 16383) or (m.group(3) and int(m.group(4)) > int(m.group(3))):
+            raise CFError("INVALID_REQUEST", f"列「{c['name']}」的类型不支持：{c.get('sqlType')}", 400)
+        if c["name"] in pk and t in ("TEXT", "JSON"):
+            raise CFError("INVALID_REQUEST", f"主键列「{c['name']}」不能是 {t}，请改为 VARCHAR / INT 等", 400)
+        null = "NOT NULL" if (c["name"] in pk or not c.get("nullable", True)) else "NULL"
+        lines.append(f"  {writer.q(c['name'])} {t} {null}")
+    lines.append("  PRIMARY KEY (" + ", ".join(writer.q(p) for p in (pk or ["id"])) + ")")
+    return (f"CREATE TABLE {writer.q(table)} (\n" + ",\n".join(lines) +
+            "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='created by CellFlow'")
+
+
+def create_table(ds_id: int, table: str, columns: list[dict], primary_key: list[str]) -> dict:
+    ddl = create_table_ddl(ds_id, table, columns, primary_key)
+    with engine_for(ds_id).connect() as c:
+        if writer.table_exists(c, table):
+            raise CFError("TABLE_EXISTS", f"表「{table}」已存在，请直接选择它或换个表名", 409)
+        c.execute(text(ddl))
+        c.commit()
+    return {"ddl": ddl, "table": describe_table(ds_id, table)}

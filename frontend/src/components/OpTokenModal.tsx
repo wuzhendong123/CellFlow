@@ -29,6 +29,7 @@ export default function OpTokenModal() {
   return (
     <Modal
       open={!!req}
+      zIndex={2100} // 口令弹窗总在最上层（可能从其他弹窗、抽屉里触发）
       title={req?.title}
       okText="确认"
       cancelText="取消"

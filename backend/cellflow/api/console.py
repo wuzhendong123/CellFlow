@@ -153,6 +153,38 @@ def table(ds_id: int, table: str):
     return ok(datasources.describe_table(ds_id, table))
 
 
+class ProposeTableIn(BaseModel):
+    fields: list[dict]  # [{field, type}]
+    keyFields: list[str] | None = None
+
+
+@router.post("/datasources/{ds_id}/tables/propose")
+def propose_table(ds_id: int, body: ProposeTableIn):
+    datasources.get(ds_id)
+    return ok(datasources.propose_table(body.fields, body.keyFields))
+
+
+class CreateTableIn(BaseModel):
+    table: str
+    columns: list[dict]  # [{name, sqlType, nullable}]
+    primaryKey: list[str] = []
+
+
+@router.post("/datasources/{ds_id}/tables/ddl")
+def table_ddl(ds_id: int, body: CreateTableIn):
+    return ok({"ddl": datasources.create_table_ddl(ds_id, body.table, body.columns, body.primaryKey)})
+
+
+@router.post("/datasources/{ds_id}/tables")
+def create_table(ds_id: int, body: CreateTableIn, op: OpContext = Depends(require_op)):
+    """按上游字段在业务库新建目标表（只建新表，不修改已有表）。"""
+    res = datasources.create_table(ds_id, body.table, body.columns, body.primaryKey)
+    ds = datasources.get(ds_id)
+    with get_engine().begin() as c:
+        audit.record(c, op.operator, op.ip, "CREATE_TABLE", f"datasource:{ds['name']}", {"table": body.table, "ddl": res["ddl"]})
+    return ok(res)
+
+
 class BindingCheckIn(BaseModel):
     nodeId: str
     dsl: dict | None = None
