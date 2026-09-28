@@ -1,0 +1,50 @@
+import fixtures
+
+
+def upload(client, data, name="hero.xlsx"):
+    return client.post("/api/files", files={"file": (name, data, "application/octet-stream")},
+                       headers={"X-CF-Operator": "%E5%BC%A0%E4%B8%89"})
+
+
+def test_upload_and_univer(client):
+    r = upload(client, fixtures.hero_config())
+    assert r.status_code == 200, r.text
+    d = r.json()["data"]
+    assert [s["name"] for s in d["sheets"]] == ["角色配置", "道具表"]
+    fid = d["fileId"]
+    info = client.get(f"/api/files/{fid}").json()["data"]
+    assert info["uploadedBy"] == "张三"
+    u = client.get(f"/api/files/{fid}/sheets/角色配置/univer?rows=1-10").json()["data"]
+    assert u["cellData"]["0"]["0"]["v"] == "开服天数上限"
+    assert u["loadedRows"] == {"from": 1, "to": 10}
+
+
+def test_upload_rejects_non_xlsx_and_too_large(client):
+    r = upload(client, b"a,b\n1,2", "x.csv")
+    assert r.status_code == 422 and r.json()["code"] == "FILE_UNSUPPORTED"
+    from cellflow.services import settings
+
+    settings.update({"file.maxSizeMB": 1}, "t")
+    r = upload(client, b"0" * (1024 * 1024 + 1), "big.xlsx")
+    assert r.status_code == 413 and r.json()["code"] == "FILE_TOO_LARGE"
+
+
+def test_same_file_dedup_storage(client):
+    a = upload(client, fixtures.hero_config()).json()["data"]
+    b = upload(client, fixtures.hero_config()).json()["data"]
+    assert a["sha256"] == b["sha256"] and a["fileId"] != b["fileId"]
+
+
+def test_suggest_and_preview(client):
+    fid = upload(client, fixtures.hero_config()).json()["data"]["fileId"]
+    s = client.post("/api/regions/suggest", json={"fileId": fid, "sheet": "角色配置",
+                                                   "range": {"startRow": 17, "startCol": 1, "endRow": 22, "endCol": 5}}).json()["data"]
+    assert s["shape"] == "DETAIL" and s["locator"]["type"] == "ANCHOR"
+    assert [c["source"] for c in s["columns"]] == ["奖励ID", "职业", "等级", "道具ID", "数量"]
+    region = {"regionId": "r", "name": "奖励", "shape": s["shape"], "locator": s["locator"], "designRange": s["range"],
+              "shapeOptions": {"headerRows": 1}, "columns": s["columns"]}
+    p = client.post("/api/regions/preview", json={"fileId": fid, "sheet": "角色配置", "region": region}).json()["data"]
+    assert p["output"]["total"] == 5
+    bad = dict(region, columns=[{"source": "奖励ID", "field": "params"}])
+    r = client.post("/api/regions/preview", json={"fileId": fid, "sheet": "角色配置", "region": bad})
+    assert r.status_code == 422
