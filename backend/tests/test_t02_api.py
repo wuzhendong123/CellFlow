@@ -30,8 +30,9 @@ def test_upload_rejects_non_xlsx_and_too_large(client):
 
 
 def test_same_file_dedup_storage(client):
-    a = upload(client, fixtures.hero_config()).json()["data"]
-    b = upload(client, fixtures.hero_config()).json()["data"]
+    data = fixtures.hero_config()  # 只生成一次：openpyxl 写入的时间戳跨秒会让两次生成的字节不同
+    a = upload(client, data).json()["data"]
+    b = upload(client, data).json()["data"]
     assert a["sha256"] == b["sha256"] and a["fileId"] != b["fileId"]
 
 

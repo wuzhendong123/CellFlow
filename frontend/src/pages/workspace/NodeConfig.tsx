@@ -1,0 +1,377 @@
+import { Alert, App, Button, Card, Checkbox, Drawer, Input, InputNumber, Radio, Select, Space, Table, Tag, Typography } from "antd";
+import { useEffect, useState } from "react";
+import { get, post } from "../../api";
+import { Dsl, DslNode } from "../../dsl";
+import ExprEditor from "./ExprEditor";
+
+export interface Analysis {
+  ok: boolean;
+  errors: any[];
+  warnings: any[];
+  ports: Record<string, Record<string, { columns: { field: string; type: string; isKey?: boolean }[]; singleRow: boolean }>>;
+}
+
+interface Props {
+  node: DslNode;
+  dsl: Dsl;
+  analysis: Analysis | null;
+  pipeline: any;
+  sampleRows: (nodeId: string, portId: string) => any[];
+  onChange: (cfg: any) => void;
+  onLabel: (label: string) => void;
+}
+
+export function inputSchema(dsl: Dsl, analysis: Analysis | null, nodeId: string, portId: string) {
+  const e = dsl.edges.find((x) => x.target.nodeId === nodeId && x.target.portId === portId);
+  if (!e || !analysis) return null;
+  return analysis.ports?.[e.source.nodeId]?.[e.source.portId] || null;
+}
+
+const fieldsOf = (s: any) => Object.fromEntries((s?.columns || []).map((c: any) => [c.field, c.type]));
+const options = (s: any) => (s?.columns || []).map((c: any) => ({ value: c.field, label: `${c.field}（${c.type}）` }));
+
+function paramsCtx(dsl: Dsl, analysis: Analysis | null, node: DslNode) {
+  const s = inputSchema(dsl, analysis, node.id, "in_params");
+  const out: Record<string, Record<string, string>> = {};
+  for (const [alias] of Object.entries(node.config.params || {})) out[alias] = fieldsOf(s);
+  return out;
+}
+
+/** P3-2 节点配置面板（右侧 E 区）。 */
+export default function NodeConfig({ node, dsl, analysis, pipeline, sampleRows, onChange, onLabel }: Props) {
+  const cfg = node.config;
+  const set = (p: any) => onChange({ ...cfg, ...p });
+  const errs = (analysis?.errors || []).filter((e) => e.node === node.id);
+  const warns = (analysis?.warnings || []).filter((e) => e.node === node.id);
+  const mainPort = node.type === "VALIDATOR" ? "in_main" : node.type === "JOIN" ? "in_left" : "in";
+  const main = inputSchema(dsl, analysis, node.id, mainPort);
+  const paramSchema = inputSchema(dsl, analysis, node.id, "in_params");
+  const edge = dsl.edges.find((e) => e.target.nodeId === node.id && e.target.portId === mainPort);
+  const rows = edge ? sampleRows(edge.source.nodeId, edge.source.portId) : [];
+
+  const paramBox = (node.type === "FILTER" || node.type === "DERIVE" || node.type === "VALIDATOR") && (
+    <Card size="small" title="参数" style={{ marginBottom: 8 }}>
+      {paramSchema ? (
+        <Space>
+          别名 <Input size="small" id="param-alias" style={{ width: 100 }} value={Object.keys(cfg.params || {})[0] || ""}
+            onChange={(e) => set({ params: e.target.value ? { [e.target.value]: "in_params" } : {} })} />
+          <span className="cf-muted">= 已连接的单行数据（{paramSchema.columns.length} 个字段）</span>
+        </Space>
+      ) : (
+        <span className="cf-muted">可从键值区拖线到节点顶部的虚线圆点（参数端口）</span>
+      )}
+    </Card>
+  );
+
+  return (
+    <div>
+      <Space style={{ marginBottom: 8 }}>
+        <Input size="small" value={node.label || ""} placeholder="节点名称" onChange={(e) => onLabel(e.target.value)} />
+        <Tag>{node.id}</Tag>
+      </Space>
+      {errs.map((e, i) => <Alert key={i} type="error" showIcon message={e.message} style={{ marginBottom: 4 }} className="node-error" />)}
+      {warns.map((e, i) => <Alert key={"w" + i} type="warning" showIcon message={e.message} style={{ marginBottom: 4 }} />)}
+      {main && (
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }} ellipsis={{ rows: 2, expandable: true }}>
+          输入字段：{main.columns.map((c) => `${c.field}(${c.type})`).join("、")}
+        </Typography.Paragraph>
+      )}
+      {paramBox}
+      {node.type === "FILTER" && (
+        <Card size="small" title="过滤条件">
+          <ExprEditor id="filter-expr" value={cfg.expr || ""} onChange={(v) => set({ expr: v })} ctx={{ fields: fieldsOf(main), params: paramsCtx(dsl, analysis, node), sampleRows: rows, expect: "bool" }} />
+        </Card>
+      )}
+      {node.type === "DERIVE" && <DeriveForm cfg={cfg} set={set} main={main} params={paramsCtx(dsl, analysis, node)} rows={rows} />}
+      {node.type === "SELECT_RENAME" && <SelectForm cfg={cfg} set={set} main={main} />}
+      {node.type === "UNION" && <span className="cf-muted">把多条结构相近的流连到「输入」端口，按字段名对齐，缺失字段为空。</span>}
+      {node.type === "LOOKUP" && <LookupForm cfg={cfg} set={set} main={main} dict={inputSchema(dsl, analysis, node.id, "in_dict")} />}
+      {node.type === "JOIN" && <JoinForm cfg={cfg} set={set} left={main} right={inputSchema(dsl, analysis, node.id, "in_right")} />}
+      {node.type === "VALIDATOR" && <ValidatorForm node={node} cfg={cfg} set={set} main={main} dsl={dsl} analysis={analysis} params={paramsCtx(dsl, analysis, node)} rows={rows} />}
+      {node.type === "SINK" && <SinkForm node={node} cfg={cfg} set={set} main={main} pipeline={pipeline} dsl={dsl} />}
+      {paramSchema === null && node.type === "DERIVE" && null}
+    </div>
+  );
+}
+
+function DeriveForm({ cfg, set, main, params, rows }: any) {
+  const cols: any[] = cfg.columns || [];
+  const upd = (i: number, p: any) => set({ columns: cols.map((c, j) => (j === i ? { ...c, ...p } : c)) });
+  const move = (i: number, d: number) => {
+    const n = [...cols];
+    const [x] = n.splice(i, 1);
+    n.splice(i + d, 0, x);
+    set({ columns: n });
+  };
+  const fields = { ...Object.fromEntries((main?.columns || []).map((c: any) => [c.field, c.type])) };
+  return (
+    <Card size="small" title="派生列（按顺序计算）" extra={<Radio.Group size="small" value={cfg.onError || "ERROR"} onChange={(e) => set({ onError: e.target.value })} options={[{ value: "ERROR", label: "出错报错" }, { value: "NULL", label: "出错置空" }]} />}>
+      {cols.map((c, i) => {
+        const before = { ...fields };
+        cols.slice(0, i).forEach((x) => (before[x.field] = x.type));
+        return (
+          <Card key={i} size="small" style={{ marginBottom: 6 }} className="derive-col">
+            <Space wrap style={{ marginBottom: 4 }}>
+              <Input size="small" className="cf-mono derive-field" style={{ width: 110 }} value={c.field} onChange={(e) => upd(i, { field: e.target.value })} />
+              <Select size="small" style={{ width: 110 }} value={c.type || "string"} onChange={(v) => upd(i, { type: v })}
+                options={["string", "int", "long", "float", "decimal(20,2)", "bool", "date", "datetime"].map((t) => ({ value: t, label: t }))} />
+              <Radio.Group size="small" value={c.mode || "ADD"} onChange={(e) => upd(i, { mode: e.target.value })} options={[{ value: "ADD", label: "新增" }, { value: "REPLACE", label: "覆盖" }]} />
+              <a onClick={() => i > 0 && move(i, -1)}>↑</a><a onClick={() => i < cols.length - 1 && move(i, 1)}>↓</a>
+              <a onClick={() => set({ columns: cols.filter((_, j) => j !== i) })}>删除</a>
+            </Space>
+            <ExprEditor id={`derive-expr-${i}`} value={c.expr || ""} onChange={(v) => upd(i, { expr: v })} ctx={{ fields: before, params, sampleRows: rows }} />
+          </Card>
+        );
+      })}
+      <Button size="small" id="add-derive" onClick={() => set({ columns: [...cols, { field: `col${cols.length + 1}`, expr: "", type: "string" }] })}>+ 派生列</Button>
+    </Card>
+  );
+}
+
+function SelectForm({ cfg, set, main }: any) {
+  const listed: any[] = cfg.columns || [];
+  const all = (main?.columns || []).map((c: any) => c.field);
+  const on = (f: string) => listed.find((x) => x.field === f);
+  return (
+    <Card size="small" title="选列与改名">
+      <Table size="small" pagination={false} rowKey="f" dataSource={all.map((f: string) => ({ f }))} columns={[
+        { title: "", width: 40, render: (_: any, r: any) => <Checkbox checked={!!on(r.f)} onChange={(e) => set({ columns: e.target.checked ? [...listed, { field: r.f }] : listed.filter((x) => x.field !== r.f) })} /> },
+        { title: "字段", dataIndex: "f" },
+        { title: "新名称", render: (_: any, r: any) => on(r.f) && <Input size="small" value={on(r.f).as || ""} placeholder={r.f} onChange={(e) => set({ columns: listed.map((x) => (x.field === r.f ? { ...x, as: e.target.value || undefined } : x)) })} /> },
+      ]} />
+    </Card>
+  );
+}
+
+function LookupForm({ cfg, set, main, dict }: any) {
+  const on = cfg.on?.[0] || {};
+  return (
+    <Card size="small" title="查表映射">
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <Space>主数据键 <Select size="small" style={{ width: 130 }} value={on.left} options={options(main)} onChange={(v) => set({ on: [{ ...on, left: v }] })} />
+          = 字典键 <Select size="small" style={{ width: 130 }} value={on.right} options={options(dict)} onChange={(v) => set({ on: [{ ...on, right: v }] })} /></Space>
+        <Space>取回字段 <Select size="small" mode="multiple" style={{ width: 260 }} value={(cfg.select || []).map((s: any) => s.field)} options={options(dict)}
+          onChange={(v: string[]) => set({ select: v.map((f) => cfg.select?.find((s: any) => s.field === f) || { field: f }) })} /></Space>
+        {(cfg.select || []).map((s: any, i: number) => (
+          <Space key={i}>{s.field} 输出为 <Input size="small" style={{ width: 120 }} value={s.as || ""} placeholder={s.field} onChange={(e) => set({ select: cfg.select.map((x: any, j: number) => (j === i ? { ...x, as: e.target.value || undefined } : x)) })} /></Space>
+        ))}
+        <Space>找不到时 <Select size="small" value={cfg.onMissing || "NULL"} onChange={(v) => set({ onMissing: v })} options={[{ value: "NULL", label: "置空" }, { value: "WARN", label: "置空并警告" }, { value: "ERROR", label: "报错" }]} /></Space>
+      </Space>
+    </Card>
+  );
+}
+
+function JoinForm({ cfg, set, left, right }: any) {
+  const broadcast = cfg.joinType === "BROADCAST";
+  const la = cfg.leftAlias || "left";
+  const ra = cfg.rightAlias || "right";
+  const aliases = cfg.conflictPolicy?.aliases || {};
+  const sel: string[] = cfg.select || [`${la}.*`, `${ra}.*`];
+  const lf = (left?.columns || []).map((c: any) => c.field);
+  const rf = (right?.columns || []).map((c: any) => c.field);
+  const dup = new Set(lf.filter((f: string) => rf.includes(f)));
+  const selected = (side: string, f: string) => sel.includes(`${side}.*`) || sel.includes(`${side}.${f}`);
+  const toggle = (side: string, f: string, v: boolean) => {
+    let s = sel.filter((x) => x !== `${side}.*`);
+    const all = side === la ? lf : rf;
+    if (sel.includes(`${side}.*`)) s = [...s, ...all.map((x: string) => `${side}.${x}`)];
+    s = v ? [...s, `${side}.${f}`] : s.filter((x) => x !== `${side}.${f}`);
+    set({ select: Array.from(new Set(s)) });
+  };
+  return (
+    <Card size="small" title="关联">
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <Radio.Group id="join-type" size="small" value={cfg.joinType} onChange={(e) => set({ joinType: e.target.value })}
+          options={[{ value: "INNER", label: "内连接" }, { value: "LEFT", label: "左连接" }, { value: "BROADCAST", label: "广播" }]} />
+        {broadcast && <Alert type="info" showIcon message="右侧必须恰好 1 行（如键值区），选中的字段会附加到左侧每一行" />}
+        <Space>左别名 <Input size="small" style={{ width: 80 }} value={la} onChange={(e) => set({ leftAlias: e.target.value })} />
+          右别名 <Input size="small" style={{ width: 80 }} value={ra} onChange={(e) => set({ rightAlias: e.target.value })} /></Space>
+        {!broadcast && (
+          <>
+            {(cfg.on || []).map((o: any, i: number) => (
+              <Space key={i}>
+                <Select size="small" style={{ width: 120 }} value={o.left} options={options(left)} onChange={(v) => set({ on: cfg.on.map((x: any, j: number) => (j === i ? { ...x, left: v } : x)) })} /> =
+                <Select size="small" style={{ width: 120 }} value={o.right} options={options(right)} onChange={(v) => set({ on: cfg.on.map((x: any, j: number) => (j === i ? { ...x, right: v } : x)) })} />
+                <a onClick={() => set({ on: cfg.on.filter((_: any, j: number) => j !== i) })}>删除</a>
+              </Space>
+            ))}
+            <Button size="small" onClick={() => set({ on: [...(cfg.on || []), { left: undefined, right: undefined }] })}>+ 关联键</Button>
+            <Checkbox checked={cfg.keyNormalize === "STRING"} onChange={(e) => set({ keyNormalize: e.target.checked ? "STRING" : undefined })}>统一为文本比较（键类型不一致时）</Checkbox>
+            <Space>期望对应关系 <Select size="small" style={{ width: 130 }} value={cfg.expectedCardinality || "MANY_TO_ONE"} onChange={(v) => set({ expectedCardinality: v })}
+              options={[{ value: "MANY_TO_ONE", label: "多对一" }, { value: "ONE_TO_ONE", label: "一对一" }, { value: "ONE_TO_MANY", label: "一对多" }, { value: "MANY_TO_MANY", label: "多对多" }]} /></Space>
+            {cfg.expectedCardinality === "MANY_TO_MANY" && <Alert type="warning" showIcon message="多对多可能让数据量成倍增长，只受绝对行数上限约束" />}
+            <Space>未匹配行 <Select size="small" value={cfg.unmatchedPolicy || "SIDE_OUTPUT"} onChange={(v) => set({ unmatchedPolicy: v })} options={[{ value: "SIDE_OUTPUT", label: "进入侧输出" }, { value: "KEEP_NULLS", label: "保留并置空" }]} /></Space>
+            <Space>膨胀上限（行） <InputNumber size="small" value={cfg.explosionGuard?.maxOutputRows} placeholder="系统设置" onChange={(v) => set({ explosionGuard: { ...(cfg.explosionGuard || {}), maxOutputRows: v || undefined } })} /></Space>
+          </>
+        )}
+        <Table size="small" pagination={false} rowKey={(r: any) => r.side + r.f} dataSource={[...lf.map((f: string) => ({ side: la, f })), ...rf.map((f: string) => ({ side: ra, f }))]}
+          columns={[
+            { title: "输出", width: 44, render: (_: any, r: any) => <Checkbox checked={selected(r.side, r.f)} onChange={(e) => toggle(r.side, r.f, e.target.checked)} /> },
+            { title: "字段", render: (_: any, r: any) => <span style={{ color: dup.has(r.f) ? "#d46b08" : undefined }}>{r.side}.{r.f}</span> },
+            { title: "别名", render: (_: any, r: any) => <Input size="small" value={aliases[`${r.side}.${r.f}`] || ""} placeholder={dup.has(r.f) ? `${r.side}_${r.f}` : r.f}
+              onChange={(e) => set({ conflictPolicy: { ...(cfg.conflictPolicy || {}), aliases: { ...aliases, [`${r.side}.${r.f}`]: e.target.value || undefined } } })} /> },
+          ]} />
+      </Space>
+    </Card>
+  );
+}
+
+const RULES = [
+  ["NOT_NULL", "必填"], ["RANGE", "范围"], ["REGEX", "正则"], ["ENUM", "枚举"], ["UNIQUE", "唯一"],
+  ["FOREIGN_KEY", "外键"], ["EXPR", "表达式"], ["RECONCILE", "对账"], ["ROW_COUNT", "行数"],
+];
+
+function ValidatorForm({ node, cfg, set, main, dsl, analysis, params, rows }: any) {
+  const rules: any[] = cfg.rules || [];
+  const refs: Record<string, string> = cfg.refs || {};
+  const upd = (i: number, p: any) => set({ rules: rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  const [newAlias, setNewAlias] = useState("");
+  const refSchema = (alias: string) => inputSchema(dsl, analysis, node.id, refs[alias]);
+  return (
+    <>
+      <Card size="small" title="引用输入（外键用）" style={{ marginBottom: 8 }}>
+        {Object.entries(refs).map(([a, p]) => (
+          <Space key={a} style={{ display: "flex", marginBottom: 4 }}>
+            <Tag>{a}</Tag>
+            {refSchema(a) ? <span className="cf-muted">已连接（{refSchema(a)!.columns.length} 个字段）</span> : <span className="cf-err">未连线：请从被引用的数据拖线到节点顶部的「{a}」方块端口</span>}
+            <a onClick={() => { const n = { ...refs }; delete n[a]; set({ refs: n }); void p; }}>删除</a>
+          </Space>
+        ))}
+        <Space><Input size="small" id="ref-alias" style={{ width: 100 }} placeholder="别名，如 item" value={newAlias} onChange={(e) => setNewAlias(e.target.value)} />
+          <Button size="small" id="add-ref" disabled={!/^[A-Za-z_]\w*$/.test(newAlias) || !!refs[newAlias]} onClick={() => { set({ refs: { ...refs, [newAlias]: `in_ref_${newAlias}` } }); setNewAlias(""); }}>+ 添加引用输入</Button></Space>
+      </Card>
+      <Card size="small" title="规则">
+        {rules.map((r, i) => (
+          <Card key={i} size="small" style={{ marginBottom: 6 }} title={<Space>
+            <Checkbox checked={r.enabled !== false} onChange={(e) => upd(i, { enabled: e.target.checked })} />
+            <Tag>{RULES.find((x) => x[0] === r.type)?.[1]}</Tag>
+            <Select size="small" value={r.severity || "ERROR"} onChange={(v) => upd(i, { severity: v })} options={[{ value: "ERROR", label: "错误" }, { value: "WARN", label: "警告" }]} />
+          </Space>} extra={<a onClick={() => set({ rules: rules.filter((_, j) => j !== i) })}>删除</a>}>
+            <RuleParams r={r} upd={(p: any) => upd(i, p)} main={main} refs={refs} refSchema={refSchema} params={params} rows={rows} />
+            <Input size="small" style={{ marginTop: 4 }} placeholder="提示文案（可选）" value={r.message || ""} onChange={(e) => upd(i, { message: e.target.value || undefined })} />
+          </Card>
+        ))}
+        <Select id="add-rule" size="small" placeholder="+ 新增规则" style={{ width: 160 }} value={null as any}
+          onChange={(t: string) => set({ rules: [...rules, { ruleId: `r${Date.now().toString(36)}`, type: t, severity: "ERROR" }] })}
+          options={RULES.map(([v, l]) => ({ value: v, label: l }))} />
+      </Card>
+    </>
+  );
+}
+
+function RuleParams({ r, upd, main, refs, refSchema, params, rows }: any) {
+  const fields = options(main);
+  switch (r.type) {
+    case "NOT_NULL":
+    case "UNIQUE":
+      return <Select size="small" mode="multiple" style={{ width: "100%" }} placeholder="字段" value={r.fields || []} options={fields} onChange={(v) => upd({ fields: v })} />;
+    case "RANGE":
+      return <Space><Select size="small" style={{ width: 120 }} value={r.field} options={fields} onChange={(v) => upd({ field: v })} />
+        最小 <InputNumber size="small" value={r.min} onChange={(v) => upd({ min: v ?? undefined })} /> 最大 <InputNumber size="small" value={r.max} onChange={(v) => upd({ max: v ?? undefined })} /></Space>;
+    case "REGEX":
+      return <Space><Select size="small" style={{ width: 120 }} value={r.field} options={fields} onChange={(v) => upd({ field: v })} /><Input size="small" className="cf-mono" value={r.pattern || ""} onChange={(e) => upd({ pattern: e.target.value })} /></Space>;
+    case "ENUM":
+      return <Space><Select size="small" style={{ width: 120 }} value={r.field} options={fields} onChange={(v) => upd({ field: v })} /><Input size="small" placeholder="允许值，逗号分隔" value={(r.values || []).join(",")} onChange={(e) => upd({ values: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} /></Space>;
+    case "FOREIGN_KEY": {
+      const aliases = Object.keys(refs);
+      if (!aliases.length) return <Alert type="warning" showIcon message="请先添加引用输入并连线" />;
+      return <Space>
+        <Select size="small" style={{ width: 110 }} value={r.field} options={fields} onChange={(v) => upd({ field: v })} /> →
+        <Select size="small" style={{ width: 90 }} value={r.ref?.input} options={aliases.map((a) => ({ value: a, label: a }))} onChange={(v) => upd({ ref: { ...(r.ref || {}), input: v } })} /> .
+        <Select size="small" style={{ width: 110 }} value={r.ref?.field} options={options(r.ref?.input ? refSchema(r.ref.input) : null)} onChange={(v) => upd({ ref: { ...(r.ref || {}), field: v } })} />
+      </Space>;
+    }
+    case "EXPR":
+      return <ExprEditor value={r.expr || ""} onChange={(v) => upd({ expr: v })} ctx={{ fields: Object.fromEntries((main?.columns || []).map((c: any) => [c.field, c.type])), params, sampleRows: rows, expect: "bool" }} />;
+    case "RECONCILE": {
+      const alias = Object.keys(params)[0];
+      return <Space wrap>明细 <Input size="small" className="cf-mono" style={{ width: 110 }} placeholder="sum(count)" value={r.detailAgg || ""} onChange={(e) => upd({ detailAgg: e.target.value })} />
+        = 汇总 <Select size="small" style={{ width: 130 }} value={r.summary?.field} placeholder={alias ? `${alias} 的字段` : "先连参数端口"} disabled={!alias}
+          options={Object.entries(params[alias] || {}).map(([f, t]) => ({ value: f, label: `${f}（${t}）` }))} onChange={(v) => upd({ summary: { param: alias, field: v } })} />
+        容差 <InputNumber size="small" style={{ width: 70 }} value={r.tolerance ?? 0} onChange={(v) => upd({ tolerance: v ?? 0 })} /></Space>;
+    }
+    case "ROW_COUNT":
+      return <Space>最少 <InputNumber size="small" value={r.min} onChange={(v) => upd({ min: v ?? undefined })} /> 最多 <InputNumber size="small" value={r.max} onChange={(v) => upd({ max: v ?? undefined })} /></Space>;
+  }
+  return null;
+}
+
+/** 输出节点：数据集名 + 目标表绑定抽屉（P3-3，F7）。 */
+function SinkForm({ node, cfg, set, main, pipeline, dsl }: any) {
+  const [open, setOpen] = useState(false);
+  const b = cfg.binding || {};
+  return (
+    <Card size="small" title="输出到业务表">
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <Space>数据集名 <Input size="small" id="sink-dataset" className="cf-mono" value={cfg.dataset || ""} onChange={(e) => set({ dataset: e.target.value })} /></Space>
+        <Space>目标表 <Tag>{b.table || "未绑定"}</Tag> <Button size="small" id="open-binding" type="primary" onClick={() => setOpen(true)}>绑定目标表</Button></Space>
+        {b.keyFields?.length ? <span>主键：{b.keyFields.join(", ")}</span> : <span className="cf-muted">未声明主键：只能整表替换，变更明细只区分新增/删除</span>}
+      </Space>
+      <BindingDrawer open={open} onClose={() => setOpen(false)} node={node} cfg={cfg} set={set} main={main} pipeline={pipeline} dsl={dsl} />
+    </Card>
+  );
+}
+
+function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: any) {
+  const { message } = App.useApp();
+  const b = cfg.binding || {};
+  const [tables, setTables] = useState<any[]>([]);
+  const [desc, setDesc] = useState<any>(null);
+  const [check, setCheck] = useState<any>(null);
+  const setB = (p: any) => set({ binding: { ...b, ...p } });
+  useEffect(() => {
+    if (open && pipeline) get<any[]>(`/api/datasources/${pipeline.datasourceId}/tables`).then(setTables).catch((e) => message.error(e.message));
+  }, [open, pipeline?.datasourceId]);
+  useEffect(() => {
+    if (open && b.table && pipeline) get(`/api/datasources/${pipeline.datasourceId}/tables/${b.table}`).then(setDesc).catch(() => setDesc(null));
+  }, [open, b.table]);
+  const runCheck = () => post(`/api/pipelines/${pipeline.id}/bindings/check`, { nodeId: node.id, dsl: { ...dsl, nodes: dsl.nodes.map((n: any) => (n.id === node.id ? { ...n, config: cfg } : n)) } }).then(setCheck);
+  useEffect(() => { if (open && b.table) runCheck().catch(() => {}); }, [open, JSON.stringify(b)]);
+  const mapping: any[] = b.columnMapping || [];
+  const src = (col: string) => mapping.find((m) => m.column === col)?.field;
+  const setMap = (col: string, field?: string) => setB({ columnMapping: [...mapping.filter((m) => m.column !== col), ...(field ? [{ field, column: col }] : [])] });
+  const autoMap = (d: any) => {
+    const fields = (main?.columns || []).map((c: any) => c.field);
+    const norm = (s: string) => s.toLowerCase().replace(/_/g, "");
+    setB({ columnMapping: d.columns.map((c: any) => ({ column: c.name, field: fields.find((f: string) => norm(f) === norm(c.name)) })).filter((m: any) => m.field) });
+  };
+  const unmappedFields = (main?.columns || []).map((c: any) => c.field).filter((f: string) => !mapping.some((m) => m.field === f));
+  return (
+    <Drawer title="目标表绑定" width={720} open={open} onClose={onClose} destroyOnHidden>
+      <Space direction="vertical" style={{ width: "100%" }}>
+        <Space>
+          目标表
+          <Select id="binding-table" showSearch style={{ width: 260 }} value={b.table || undefined} placeholder="选择业务表"
+            options={tables.map((t) => ({ value: t.table, label: t.owner && t.owner.pipelineId !== pipeline?.id ? `${t.table}（已被 ${t.owner.pipelineCode} 占用）` : t.table, disabled: !!(t.owner && t.owner.pipelineId !== pipeline?.id) }))}
+            onChange={async (v) => { setB({ table: v, columnMapping: [] }); const d = await get(`/api/datasources/${pipeline.datasourceId}/tables/${v}`); setDesc(d); autoMap(d); }} />
+        </Space>
+        {check && (
+          <>
+            {check.errors.map((e: any, i: number) => <Alert key={i} type="error" showIcon message={e.message} className="binding-error" />)}
+            {check.warnings.map((e: any, i: number) => <Alert key={"w" + i} type={e.code === "TAKEOVER_BASELINE" ? "info" : "warning"} showIcon message={e.message}
+              action={e.code === "KEY_SUGGESTED" && check.keySuggestion ? <Button size="small" onClick={() => setB({ keyFields: check.keySuggestion })}>采用</Button> : undefined} />)}
+            {check.ok && <Alert type="success" showIcon message="可以整表替换" />}
+          </>
+        )}
+        {desc && (
+          <Table size="small" rowKey="name" pagination={false} dataSource={desc.columns} columns={[
+            { title: "列名", dataIndex: "name", render: (v, c: any) => <span className="cf-mono" style={{ color: !c.nullable && !c.hasDefault && !src(v) ? "#cf1322" : undefined }}>{v}{c.autoIncrement ? "（自增）" : ""}</span> },
+            { title: "类型", dataIndex: "columnType" },
+            { title: "可空", dataIndex: "nullable", render: (v) => (v ? "是" : "否") },
+            { title: "默认值", dataIndex: "dflt", render: (v) => v ?? "" },
+            { title: "映射来源", render: (_: any, c: any) => <Select size="small" allowClear style={{ width: 160 }} value={src(c.name)} options={options(main)} onChange={(v) => setMap(c.name, v)} /> },
+          ]} />
+        )}
+        {unmappedFields.length > 0 && <span className="cf-muted">未被映射的字段：{unmappedFields.join("、")}</span>}
+        <Space>主键（可选）<Select size="small" mode="multiple" style={{ width: 260 }} value={b.keyFields || []} options={options(main)} onChange={(v) => setB({ keyFields: v.length ? v : null })} /></Space>
+        <Space>写入方式 <Tag>整表替换（v1）</Tag></Space>
+        <Space wrap>安全闸覆盖（空为系统设置）
+          删除比例 <InputNumber size="small" min={0} max={1} step={0.05} value={b.guards?.maxDeleteRatio} onChange={(v) => setB({ guards: { ...(b.guards || {}), maxDeleteRatio: v ?? undefined } })} />
+          行数波动 <InputNumber size="small" min={0} max={1} step={0.05} value={b.guards?.maxRowChangeRatio} onChange={(v) => setB({ guards: { ...(b.guards || {}), maxRowChangeRatio: v ?? undefined } })} />
+          <Checkbox checked={b.guards?.forbidEmpty ?? true} onChange={(e) => setB({ guards: { ...(b.guards || {}), forbidEmpty: e.target.checked } })}>清空保护</Checkbox>
+        </Space>
+        <Button onClick={() => runCheck().catch((e: any) => message.error(e.message))}>重新检查</Button>
+      </Space>
+    </Drawer>
+  );
+}

@@ -1,0 +1,41 @@
+html, body, #root { height: 100%; margin: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f6f8; }
+.cf-header { display: flex; align-items: center; gap: 24px; background: #001529; color: #fff; padding: 0 16px; height: 48px; }
+.cf-header .logo { font-weight: 700; font-size: 16px; letter-spacing: 1px; }
+.cf-header .nav a { color: rgba(255,255,255,.75); margin-right: 20px; text-decoration: none; }
+.cf-header .nav a.active { color: #fff; font-weight: 600; }
+.cf-header .right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.cf-intranet { font-size: 12px; background: #fa8c16; color: #fff; padding: 1px 6px; border-radius: 3px; }
+.cf-page { padding: 16px; }
+.cf-crumb { padding: 8px 16px; background: #fff; border-bottom: 1px solid #eee; font-size: 13px; color: #666; }
+.cf-workspace { display: flex; flex-direction: column; height: calc(100vh - 48px - 36px - 46px); background: #fff; }
+.cf-ws-body { flex: 1; display: flex; min-height: 0; }
+.cf-palette { width: 150px; border-right: 1px solid #eee; padding: 8px; overflow: auto; }
+.cf-palette.collapsed { width: 44px; }
+.cf-palette .item { border: 1px solid #d9d9d9; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; cursor: grab; background: #fafafa; font-size: 12px; }
+.cf-canvas { flex: 1; min-width: 200px; position: relative; }
+.cf-config { width: 380px; border-left: 1px solid #eee; overflow: auto; padding: 12px; }
+.cf-sheet { flex: 1.5; display: flex; flex-direction: column; min-width: 300px; border-right: 1px solid #eee; }
+.cf-sheet-host { flex: 1; position: relative; }
+.cf-splitter { width: 6px; cursor: col-resize; background: #f0f0f0; }
+.cf-result { height: 260px; border-top: 1px solid #eee; overflow: auto; }
+.cf-result.collapsed { height: 36px; overflow: hidden; }
+.cf-node { background: #fff; border: 1px solid #bfbfbf; border-radius: 6px; min-width: 150px; font-size: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.cf-node.selected { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.2); }
+.cf-node.error { border-color: #ff4d4f; }
+.cf-node.flash { animation: cfflash 1s ease 2; }
+@keyframes cfflash { 50% { box-shadow: 0 0 0 6px rgba(255,77,79,.45); } }
+.cf-node .title { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; font-weight: 600; display: flex; gap: 6px; align-items: center; }
+.cf-node .badges { margin-left: auto; font-weight: 400; }
+.cf-node .ports { padding: 4px 8px; }
+.cf-node .port-row { position: relative; height: 20px; line-height: 20px; }
+.cf-node .port-out { text-align: right; }
+.cf-node .param-handle { border-style: dashed !important; background: #fff !important; }
+.cf-node .ref-handle { border-radius: 2px !important; border-style: dashed !important; background: #fff !important; }
+.cf-node .side-handle { background: #fa8c16 !important; }
+.cf-mono { font-family: Menlo, Consolas, monospace; }
+.cf-muted { color: #888; font-size: 12px; }
+.cf-err { color: #cf1322; }
+.cf-warn { color: #d46b08; }
+.cf-banner-frozen { background: #f9f0ff; color: #531dab; padding: 6px 16px; border-bottom: 1px solid #d3adf7; }
+.cf-row-error td { background: #fff1f0 !important; }

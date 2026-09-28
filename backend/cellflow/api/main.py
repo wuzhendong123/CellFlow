@@ -33,7 +33,20 @@ def create_app() -> FastAPI:
     from cellflow.api import routers
 
     routers.register(app)
+    _mount_console(app)
     return app
+
+
+def _mount_console(app: FastAPI) -> None:
+    """生产部署时由后端直接托管前端构建产物（CF_CONSOLE_DIR，默认 ../frontend/dist，不存在则跳过）。"""
+    import os
+    from pathlib import Path
+
+    from fastapi.staticfiles import StaticFiles
+
+    d = Path(os.environ.get("CF_CONSOLE_DIR") or Path(__file__).resolve().parents[3] / "frontend" / "dist")
+    if (d / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=d, html=True), name="console")
 
 
 app = create_app()

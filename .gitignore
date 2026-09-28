@@ -9,3 +9,6 @@ dist/
 /data/
 *.egg-info/
 backend/tests/fixtures/generated/
+dump.rdb
+*.xlsx
+!backend/tests/**/*.xlsx
