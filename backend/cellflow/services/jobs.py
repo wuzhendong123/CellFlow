@@ -226,12 +226,13 @@ def submit(app: dict, meta: dict, data: bytes, file_name: str) -> dict:
             raise CFError("INVALID_REQUEST", "指定的方案版本不存在", 400)
     f = files.save_upload(data, file_name, app["app_key"])
     superseded: list[int] = []
+    latest_only = not revision_is_partition(rev_id)
     with get_engine().begin() as c:
         jid = c.execute(parse_job.insert().values(
             pipeline_id=p["id"], revision_id=rev_id, client_app_id=app["id"], idempotency_key=idem, file_id=f["fileId"],
             mode=mode, status="QUEUED", operator=(meta.get("operator") or "")[:64] or None, callback_url=cb,
         )).inserted_primary_key[0]
-        if mode == "EXECUTE":  # D12：同方案只执行最新的一个
+        if mode == "EXECUTE" and latest_only:  # D12：整表替换的方案只执行最新的一个；按分区替换时一个文件是一批，每个都执行
             superseded = [r[0] for r in c.execute(select(parse_job.c.id).where(and_(
                 parse_job.c.pipeline_id == p["id"], parse_job.c.mode == "EXECUTE", parse_job.c.status == "QUEUED",
                 parse_job.c.id < jid))).all()]
@@ -242,6 +243,16 @@ def submit(app: dict, meta: dict, data: bytes, file_name: str) -> dict:
         enqueue_job_callback(s)
     dispatch(jid)
     return {"jobId": jid, "status": get_job(jid)["status"]}
+
+
+def revision_is_partition(rev_id: int) -> bool:
+    """方案版本里是否有按分区替换的输出节点（此时每个任务都要执行，不适用「只执行最新」）。"""
+    from cellflow.meta.tables import pipeline_revision
+
+    with get_engine().connect() as c:
+        dsl = c.execute(select(pipeline_revision.c.dsl).where(pipeline_revision.c.id == rev_id)).scalar() or {}
+    return any(n.get("type") == "SINK" and ((n.get("config") or {}).get("binding") or {}).get("strategy") == "PARTITION"
+               for n in dsl.get("nodes") or [])
 
 
 def list_jobs(pipeline_id: int | None = None, client_app_id: int | None = None, status: str | None = None,

@@ -557,7 +557,7 @@ function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: a
   const autoMap = (d: any) => {
     const fields = (main?.columns || []).map((c: any) => c.field);
     const norm = (s: string) => s.toLowerCase().replace(/_/g, "");
-    setB({ columnMapping: d.columns.map((c: any) => ({ column: c.name, field: fields.find((f: string) => norm(f) === norm(c.name)) })).filter((m: any) => m.field) });
+    return d.columns.map((c: any) => ({ column: c.name, field: fields.find((f: string) => norm(f) === norm(c.name)) })).filter((m: any) => m.field);
   };
   const unmappedFields = (main?.columns || []).map((c: any) => c.field).filter((f: string) => !mapping.some((m) => m.field === f));
   return (
@@ -567,7 +567,7 @@ function BindingDrawer({ open, onClose, node, cfg, set, main, pipeline, dsl }: a
           目标表
           <Select id="binding-table" showSearch style={{ width: 260 }} value={b.table || undefined} placeholder="选择业务表"
             options={tables.map((t) => ({ value: t.table, label: t.owner && t.owner.pipelineId !== pipeline?.id ? `${t.table}（已被 ${t.owner.pipelineCode} 占用）` : t.table, disabled: !!(t.owner && t.owner.pipelineId !== pipeline?.id) }))}
-            onChange={async (v) => { setB({ table: v, columnMapping: [] }); const d = await get(`/api/datasources/${pipeline.datasourceId}/tables/${v}`); setDesc(d); autoMap(d); }} />
+            onChange={async (v) => { const d = await get(`/api/datasources/${pipeline.datasourceId}/tables/${v}`); setDesc(d); setB({ table: v, columnMapping: autoMap(d) }); }} />
           <Tooltip title="还没有表？按上游字段自动生成表结构，确认后在业务库里新建">
             <Button id="create-table" disabled={!main?.columns?.length} onClick={() => setCreating(true)}>新建表…</Button>
           </Tooltip>

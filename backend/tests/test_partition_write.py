@@ -84,3 +84,20 @@ def test_mixed_strategy_rejected_and_fields_required(client, biz):
          "columnMapping": [{"field": "job", "column": "job_name"}]}
     res = datasources.check_binding(ds, b, [{"field": "job", "type": "STRING"}])
     assert any(e["code"] == "PARTITION_FIELDS_REQUIRED" for e in res["errors"]), res
+
+
+def test_partition_every_job_executes_not_latest_only(client, biz, monkeypatch):
+    """按分区替换：一个文件是一批，连续提交的每个任务都执行（按提交顺序串行），不会被「只执行最新」作废。"""
+    import cellflow.services.jobs as jobs_mod
+    from cellflow.runtime.executor import run_job
+    from cellflow.services import client_apps
+
+    env = setup_pipeline(client, dsl=partition_dsl())
+    monkeypatch.setattr("cellflow.runtime.queue.dispatch", lambda jid: None)
+    app = client_apps.get(env["app"]["id"])
+    a = jobs_mod.submit(app, {"pipelineCode": "hero_config"}, fixtures.hero_config(), "a.xlsx")["jobId"]
+    b = jobs_mod.submit(app, {"pipelineCode": "hero_config"}, fixtures.hero_config(hp_overrides={"战士": [5, 6, 7, 8]}), "b.xlsx")["jobId"]
+    assert okd(client.get(f"/api/jobs/{a}"))["status"] == "QUEUED"
+    assert run_job(a) == "PUBLISHED"
+    assert run_job(b) == "PUBLISHED"
+    assert hp(biz)[("战士", 1)] == 5

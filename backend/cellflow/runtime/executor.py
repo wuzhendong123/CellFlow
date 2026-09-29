@@ -27,6 +27,8 @@ def _finish(job_id: int, status: str, **vals) -> None:
 
 
 def newer_execute_exists(job: dict) -> int | None:
+    if jobs.revision_is_partition(job["revision_id"]):  # 按分区替换：一个文件一批，每个任务都执行（按提交顺序串行）
+        return None
     with get_engine().connect() as c:
         return c.execute(select(parse_job.c.id).where(and_(
             parse_job.c.pipeline_id == job["pipeline_id"], parse_job.c.mode == "EXECUTE", parse_job.c.id > job["id"],

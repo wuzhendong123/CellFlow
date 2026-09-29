@@ -248,8 +248,14 @@ class PartitionWrite:
 
 
 def _partition_where(pw_cols: list[str], partitions: list[tuple], prefix: str = "p") -> tuple[str, dict]:
-    """(a, b) IN ((:p0_0, :p0_1), ...)；取值全部参数化。"""
+    """单列（日期/批次号）：col = :p0 / col IN (:p0, ...)，走索引；多列：(a, b) IN ((:p0_0, :p0_1), ...)。取值全部参数化。"""
     params: dict[str, Any] = {}
+    if len(pw_cols) == 1:
+        for i, vals in enumerate(partitions):
+            params[f"{prefix}{i}"] = db_value(vals[0])
+        if len(partitions) == 1:
+            return f"{q(pw_cols[0])} = :{prefix}0", params
+        return f"{q(pw_cols[0])} IN ({', '.join(':' + k for k in params)})", params
     groups = []
     for i, vals in enumerate(partitions):
         names = []
@@ -276,6 +282,14 @@ def read_partitions(conn, table: str, partition_columns: list[str], partitions: 
     return cols, out
 
 
+def count_partitions(conn, table: str, partition_columns: list[str], partitions: list[tuple]) -> int:
+    n = 0
+    for k in range(0, len(partitions), 500):
+        where, params = _partition_where(partition_columns, partitions[k:k + 500])
+        n += conn.execute(text(f"SELECT COUNT(*) FROM {q(table)} WHERE {where}"), params).scalar() or 0
+    return n
+
+
 def partition_replace(engine: Engine, writes: list[PartitionWrite], save_before) -> dict[str, str]:
     """一个事务内：锁住并读出各表本批分区的旧数据（交给 save_before 保存，用于撤销），删除这些分区，写入新数据。
     任一步失败整体回滚，业务表不变。返回写后校验和。"""
@@ -295,8 +309,8 @@ def partition_replace(engine: Engine, writes: list[PartitionWrite], save_before)
                     stmt = text(f"INSERT INTO {q(w.table)} ({cols}) VALUES ({ph})")
                     for k in range(0, len(w.rows), BATCH):
                         c.execute(stmt, [{f"p{i}": db_value(r.get(col)) for i, col in enumerate(w.columns)} for r in w.rows[k:k + BATCH]])
-                _, now = read_partitions(c, w.table, w.partition_columns, w.partitions)
-                if len(now) != len(w.rows):
-                    raise WriteError("WRITE_VERIFY_FAILED", f"{w.table} 写入后分区内行数 {len(now)} 与预期 {len(w.rows)} 不一致")
+                now = count_partitions(c, w.table, w.partition_columns, w.partitions)
+                if now != len(w.rows):
+                    raise WriteError("WRITE_VERIFY_FAILED", f"{w.table} 写入后分区内行数 {now} 与预期 {len(w.rows)} 不一致")
     with engine.connect() as c:
         return {w.table: checksum(c, w.table) for w in writes}

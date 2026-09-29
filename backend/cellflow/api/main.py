@@ -15,11 +15,15 @@ def create_app() -> FastAPI:
     app = FastAPI(title="CellFlow", version="0.1.0")
     install_error_handlers(app)
 
+    def meta_db_ok() -> bool:
+        with get_engine().connect() as c:  # 必须归还连接，否则每次健康检查泄漏一个，连接池很快耗尽
+            return c.execute(text("SELECT 1")).scalar() == 1
+
     @app.get("/healthz")
     def healthz():
         checks = {}
         for name, fn in {
-            "metaDb": lambda: get_engine().connect().execute(text("SELECT 1")).scalar() == 1,
+            "metaDb": meta_db_ok,
             "redis": lambda: get_redis().ping(),
             "storage": lambda: get_storage().ping(),
         }.items():
